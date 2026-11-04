@@ -46,3 +46,10 @@
   - **Łączny szacunek Etapu A:** **~118 CPU-h / ~14.7 GPU-h** (czas zegarowy ~45–60 min).
 
 ## Submissions
+
+- 2026-11-04 (Stage A): submitted @ `00f9d5c` (`feat/sc-erl`), `lem-gpu-short`, `--exclude=r16-11`, `-A hpc-jakgil6519-1780267238`
+  - `6236415` `HalfCheetah-v5` (`prefix-h200` s3-4, `prefix-h100` s3-4, `prefix-h400` s0-4, `erl-log` s0-4; `--array=63-64,68-69,80-84,85-89`, `-c 8 --mem=16gb --time=0-04:00:00`)
+  - `6236416` `Hopper-v5` (`prefix-h200` s3-4, `prefix-h100` s3-4, `prefix-h400` s0-4, `erl-log` s0-4; `--array=63-64,68-69,80-84,85-89`, `-c 8 --mem=16gb --time=0-04:00:00`)
+  - balance before Stage A: `1172.8 CPU-h / 472.9 GPU-h`
+  - estimated Stage A cost: `~118 CPU-h / ~14.7 GPU-h` (28 new tasks; 12 tasks for `prefix-h100`/`prefix-h200` seeds `0..2` reused from `prefix-v1` and `prefix-adapt-v1`).
+
