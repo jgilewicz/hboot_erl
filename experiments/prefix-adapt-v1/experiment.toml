@@ -87,5 +87,13 @@ note = "overlap with independent H=1000 truth"
 [cluster]
 ssh_host = "wcss"
 
+[[cluster.jobs]]
+id = 6236026
+label = "HalfCheetah-v5 (prefix-adapt)"
+
+[[cluster.jobs]]
+id = 6236027
+label = "Hopper-v5 (erl, sc_erl-random, prefix-h200, prefix-h100, prefix-adapt)"
+
 [report]
 url = ""
