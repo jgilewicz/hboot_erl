@@ -1,0 +1,64 @@
+name = "prelim-5env-v1"
+question = "Does fixed prefix h=200 without a critic beat SC-ERL (random gate) and full ERL (H=1000) outside HalfCheetah and Hopper across held-out Walker2d-v5, Swimmer-v5, and Ant-v5?"
+
+envs = ["HalfCheetah-v5", "Hopper-v5", "Walker2d-v5", "Swimmer-v5", "Ant-v5"]
+conditions = ["erl", "sc_erl-random", "prefix-h200"]
+seeds = [0, 1, 2]
+total_steps = 1_000_000
+
+[wandb]
+entity = "evo_rl"
+project = "triage_erl"
+tag = "prelim-5env-v1"
+run_name = '^(?P<condition>.+)_(?P<env>[^_]+)_s(?P<seed>\d+)$'
+
+[metric]
+keys = ["perf/eval_rl", "eval_reward"]
+x = ["env_steps", "total_steps"]
+label = "eval return"
+final_window = 0.1
+
+[reference]
+condition = "erl"
+thresholds = [0.25, 0.5, 0.75, 0.9, 1.0]
+
+[[comparisons]]
+a = "prefix-h200"
+b = "sc_erl-random"
+question = "Fixed prefix h=200 vs SC-ERL random gate (critic surrogate) across 5 environments"
+
+[[comparisons]]
+a = "prefix-h200"
+b = "erl"
+question = "Fixed prefix h=200 vs full-horizon ERL (H=1000) across 5 environments"
+
+[[comparisons]]
+a = "sc_erl-random"
+b = "erl"
+question = "SC-ERL random gate vs full-horizon ERL (H=1000) across 5 environments"
+
+[preregistration]
+primary_env = "Walker2d-v5"
+primary = "Final MA(5) of perf/eval_rl across 3 seeds per condition on Walker2d-v5, Swimmer-v5, Ant-v5 (held-out), with HalfCheetah-v5 and Hopper-v5 reported separately as developer baselines."
+h1 = "prefix-h200 > sc_erl-random in mean final MA(5) in >= 2/3 held-out envs (Walker2d, Ant, Swimmer), with mean difference >= +5% and paired seed win in >= 2/3 seeds."
+h2 = "prefix-h200 > erl in mean final MA(5) in >= 2/3 held-out envs."
+h3 = "Where H1 holds, prefix-h200 reaches sc_erl-random final MA(5) in median <= 70% of budget (>= 30% step savings)."
+notes = "HC and Hopper are developer environments and reported separately. Swimmer is marked exploratory due to TD3 vulnerability at gamma=0.99."
+report_only = [
+    "AUC of perf/eval_rl curve per seed and condition",
+    "Performance gain %: (prefix-h200 - sc_erl-random) / |sc_erl-random| and (prefix-h200 - erl) / |erl|",
+    "Step savings %: 1 - (env_steps to sc_erl final MA(5)) / 1_000_000",
+    "Speedup factor: env_steps(sc_erl-random) / env_steps(prefix-h200) to reach matching thresholds",
+    "ES generation throughput: 333 gen (prefix-h200) vs 90 gen (erl)",
+    "prefix_log/ep_len_mean over time"
+]
+
+[[secondary]]
+key = "cost/real_frac"
+label = "real_frac"
+note = "share of horizon evaluated per individual (0.2 for prefix-h200 vs 1.0 for erl/sc_erl)"
+
+[[secondary]]
+key = "select/elite_overlap"
+label = "elite overlap (shadow)"
+note = "overlap with independent full-horizon ground truth"
