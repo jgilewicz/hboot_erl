@@ -62,3 +62,4 @@ note = "share of horizon evaluated per individual (0.2 for prefix-h200 vs 1.0 fo
 key = "select/elite_overlap"
 label = "elite overlap (shadow)"
 note = "overlap with independent full-horizon ground truth"
+

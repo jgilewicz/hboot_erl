@@ -81,8 +81,26 @@
 
 ---
 
+## Moduł A2 – Zmiana zakresu i bramka budżetowa
+
+1. **Zakres A2 (jedna komórka zamiast 2×2):**
+   - Uruchamiamy wyłącznie komórkę **„ocena pełna / bufor pełny”** ($H=1000$) przy stałej liczbie generacji $G$ i aktualizacji TD3 $U$ pobranych z referencyjnego `prefix-h200` (dla $G=333$, $U \approx 10^6$).
+   - Środowiska: `HalfCheetah-v5`, `Hopper-v5`, `Walker2d-v5` (seedy 0–2 $\implies$ 9 zadań).
+   - Pozostałe komórki siatki 2×2 („ocena h200 / bufor pełny”, „ocena pełna / bufor h200”) zostają **odroczone (nie anulowane)**.
+2. **Warunek bramkowy startu A2:**
+   - A2 startuje ściśle po M, A1 i A3, **tylko jeśli saldo grantu po nich wynosi $\ge 308\text{ CPU-h}$** (szacowany koszt A2: 9 zadań $\times \sim 17.5\text{ CPU-h} \approx 158\text{ CPU-h} + 150\text{ CPU-h}$ rezerwy minimalnej).
+3. **Przybliżenie A2 z istniejących logów (bez nowych runów):**
+   - Wygenerowano wykres `eval_rl` vs numer generacji: [`a2_preview_eval_vs_generation.png`](plots/a2_preview_eval_vs_generation.png) ([SVG](plots/a2_preview_eval_vs_generation.svg)).
+   - *Status:* Wykres stanowi poglądowe przybliżenie A2 (pokazuje, że przy tej samej generacji $g=90$ prefix-h200 dorównuje ERL mimo 3.7× mniejszej liczby aktualizacji TD3 i kroków środowiska). Nie stanowi jednak formalnego wyniku A2, ponieważ w standardowym treningu $U$ narastało w różnym tempie na generację.
+4. **Hipoteza H7 (bez zmian):**
+   - Oceniana na pojedynczej komórce: różnica (ocena pełna − ocena h200) przy równych $G$ i $U$. Jeśli efekt oceny $< 5\%$ w $\ge 2/3$ środowisk, potwierdza to, że zysk prefiksu wynika z liczby generacji ewolucyjnych, a nie ze specyfiki skróconego horyzontu.
+
+---
+
 ## Raport dla promotora (`report.html`)
 1. Tabela zbiorcza 5 środowisk × 3 warunki: średnia ± std, wyniki per seed, kolumny zysku $\Delta\%$ vs `sc_erl-random` i vs `erl`.
 2. Siatka 5 wykresów krzywych uczenia (średnia + min/max po 3 seedach).
 3. Tabela oszczędności kroków (Speedup, Step Savings, kroki do progu 100% `sc_erl-random`).
-4. Rozliczenie zużycia CPU-h / GPU-h na klastrze.
+4. Wykres i analiza A2 (przybliżenie z istniejących danych oraz wyniki po ewentualnym przejściu bramki budżetowej).
+5. Rozliczenie zużycia CPU-h / GPU-h na klastrze.
+
