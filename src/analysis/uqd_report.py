@@ -140,18 +140,31 @@ def _corr(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.corrcoef(a, b)[0, 1])
 
 
+def split(d: dict[str, np.ndarray]) -> tuple[dict, dict]:
+    # rules read sigma, priors and parent means from repeats A, truth comes
+    # from repeats B: with fall/survive returns the sample mean and variance
+    # of the same repeats are dependent, so sharing them leaks truth
+    half = d["elite_reps_f"].shape[-1] // 2
+    est, truth = dict(d), dict(d)
+    for key in ("elite_reps_f", "off_reps_f"):
+        est[key], truth[key] = d[key][..., :half], d[key][..., half:]
+    return est, truth
+
+
 def generation(d: dict[str, np.ndarray], g: int) -> dict[str, float]:
-    p = contested(d, g)
+    est, held_out = split(d)
+    p = contested(est, g)
     if not np.array_equal(p.y_o > p.y_e, p.accepted):
         raise ValueError(
             f"generation {g}: raw rule disagrees with recorded insertion; "
             "uqd_probe.batch_winners and qd_archive.insert have diverged"
         )
-    delta = p.mu_o - p.mu_e
+    t = contested(held_out, g)
+    delta = t.mu_o - t.mu_e
     truth = delta > 0
     row = {"contested": float(delta.size)}
     row["gain_oracle"] = float(np.maximum(delta, 0).mean()) if delta.size else 0
-    for name, accept in decisions(p, prior(d, g)).items():
+    for name, accept in decisions(p, prior(est, g)).items():
         row[f"gain_{name}"] = (
             float((accept * delta).mean()) if delta.size else 0
         )

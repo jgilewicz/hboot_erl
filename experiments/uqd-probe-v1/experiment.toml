@@ -40,15 +40,31 @@ p1 = "gap exists: lucky_z = mean(y_elite - mu_elite) / rms(sigma_elite) over occ
 p2 = "for some rule in {eb_hetero, eb_lineage}: delta = gain(rule) - gain(raw) per probe, one-sided 97.5 % CI with Bonferroni over 2 rules x 2 tasks (0.625 % percentile) lower bound > 0, and delta recovers >= 10 % of headroom"
 go = "P1 and P2 on at least one task"
 no_go = "close the UQD replacement-rule direction; record in notes.md"
+deviation = "2026-10-27, after ant-omni, before walker2d-uni data: rules read sigma/prior/parent mu from repeats 0-7, truth from repeats 8-15. Shared repeats leaked truth on ant (fall/survive returns: sample mean and variance dependent); same-repeats eb_hetero GO flipped to delta CI [-3.69, -0.32]"
 report_only = ["elite_truth delta (re-evaluation ceiling)", "decision accuracy per rule", "placement_acc", "qd_corrected_over_stored (offset by run min)", "corr_survived_luck", "herit_mu, herit_log_sd (parent1 -> offspring)", "contested per probe"]
 
 [resources]
 partition = "lem-gpu-short"
 per_task = "1 H100, -c 8, 16 GB, --time 0-04:00:00"
-estimate = "~1 GPU-h each (unmeasured on GPU); upper bound 8 GPU-h, 64 CPU-h"
+estimate = "measured: ant 0.35 s/iter (~0.5 GPU-h), walker 11.5 s/iter (~7 GPU-h); walker resubmitted with 9h"
 
 [cluster]
 ssh_host = "wcss"
 
 [report]
 url = ""
+
+[[cluster.jobs]]
+id = "6173701"
+env = "walker2d-uni"
+note = "cancelled after ~12 min: 11.5 s/iteration, would TIMEOUT at 4h"
+
+[[cluster.jobs]]
+id = "6173767"
+env = "walker2d-uni"
+note = "d2fc1e8, 9h; cancelled by user at 4:31 after 13/20 probes (iteration 1300); verdict on the partial npz"
+
+[[cluster.jobs]]
+id = "6173702"
+env = "ant-omni"
+note = "d2fc1e8, --array=60, lem-gpu-short, 1 H100, -c 8, 16gb, 4h"
