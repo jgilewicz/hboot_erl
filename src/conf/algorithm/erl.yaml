@@ -55,6 +55,12 @@ h_steps: 250
 
 # short-prefix population evaluation (null = full horizon)
 prefix_steps: null
+prefix_adapt: false
+adapt_interval: 20
+adapt_ceiling_every: 5
+adapt_window: 3
+adapt_r_threshold: 0.9
+adapt_min_ceiling: 0.3
 # critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
 screen_candidates: null
 surrogate_batch: 1024

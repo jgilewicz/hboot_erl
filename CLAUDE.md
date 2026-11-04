@@ -37,7 +37,8 @@ src/
   `erl.yaml`, `SCERLConfig` subclasses `ERLConfig`, `_run_sc_erl` reuses
   `_erl_kwargs`, and `algos/erl.py` exposes the shared `Run` /
   `build_run` / `train_and_merge` / `maybe_evaluate`. `theta`/`h_steps`
-  are inert in SC-ERL; `prefix_steps` (short-prefix population rollout) and
+  are inert in SC-ERL; `prefix_steps` (short-prefix population rollout),
+  `prefix_adapt` (adaptive prefix $h \in \{50, 100, 200, 400, 1000\}$), and
   `screen_candidates` (critic-μ pre-screening of CEM samples) are `erl`
   options with shadow metrics every `shadow_interval` generations.
 - A surrogate mode = a `CriticHead` in `common/critic_heads.py`
@@ -82,7 +83,7 @@ src/
 `slurm_run_array.sh` is the only slurm script: array-job-per-`(condition,
 seed)` for one `TARGET_ENV` — sac, ppo, td3, crossq, erl, sc_erl × 4 modes,
 3 σ-modes × `random_gate`, `prefix-h200`, `prefix-h100`, `erl-screen`,
-15 × 5 = 75 tasks. `PROJECT_DIR` defaults to
+`prefix-adapt`, 16 × 5 = 80 tasks. `PROJECT_DIR` defaults to
 `SLURM_SUBMIT_DIR`. Jobs run `.venv/bin/python` directly — `uv sync` on
 the login node first; parallel `uv run` calls race on the shared uv cache.
 

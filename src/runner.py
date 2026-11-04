@@ -58,6 +58,12 @@ def _erl_kwargs(cfg: DictConfig) -> dict[str, Any]:
         prefix_steps=int(algo_cfg.prefix_steps)
         if algo_cfg.prefix_steps is not None
         else None,
+        prefix_adapt=bool(algo_cfg.prefix_adapt),
+        adapt_interval=int(algo_cfg.adapt_interval),
+        adapt_ceiling_every=int(algo_cfg.adapt_ceiling_every),
+        adapt_window=int(algo_cfg.adapt_window),
+        adapt_r_threshold=float(algo_cfg.adapt_r_threshold),
+        adapt_min_ceiling=float(algo_cfg.adapt_min_ceiling),
         screen_candidates=int(algo_cfg.screen_candidates)
         if algo_cfg.screen_candidates is not None
         else None,

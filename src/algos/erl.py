@@ -29,6 +29,7 @@ from modules.evo_module import CEM, _cem_ask
 
 Metrics = dict[str, float]
 _SHADOW_KEY_OFFSET = 40_000
+ADAPT_H_GRID: tuple[int, ...] = (50, 100, 200, 400, 1000)
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,13 @@ class ERLConfig:
 
     # short-prefix population evaluation (None = full horizon)
     prefix_steps: int | None = None
+    # adaptive prefix h in {50, 100, 200, 400, 1000} calibrated every adapt_interval gens
+    prefix_adapt: bool = False
+    adapt_interval: int = 20
+    adapt_ceiling_every: int = 5
+    adapt_window: int = 3
+    adapt_r_threshold: float = 0.9
+    adapt_min_ceiling: float = 0.3
     # critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
     screen_candidates: int | None = None
     surrogate_batch: int = 1024
@@ -620,19 +628,225 @@ def _prefix_generation(
     return metrics
 
 
+@dataclass
+class AdaptState:
+    grid: tuple[int, ...]
+    current_h: int
+    pending_h: int | None = None
+    last_ceiling: float = 1.0
+    calibration_count: int = 0
+    cal_corrs: list[np.ndarray] = field(default_factory=list)
+    last_r_vec: np.ndarray = field(default_factory=lambda: np.ones(0))
+    cal_overhead_steps: int = 0
+
+
+def _collect_calibration_rollout(
+    run: Run,
+    pop_env: gym.vector.VectorEnv,
+    pop_policy: Callable[[jax.Array, jnp.ndarray], jnp.ndarray],
+    grid: tuple[int, ...],
+) -> tuple[jax.Array, dict[int, jax.Array]]:
+    running = np.zeros(run.cfg.pop_size, dtype=np.float32)
+    alive = np.ones(run.cfg.pop_size, dtype=bool)
+    prefix_returns: dict[int, jax.Array] = {}
+    grid_set = set(grid)
+
+    def capture_prefixes(
+        step: int,
+        reward: jnp.ndarray,
+        terminated: jnp.ndarray,
+        truncated: jnp.ndarray,
+        next_states: jnp.ndarray,
+    ) -> None:
+        nonlocal running, alive
+        running = running + np.asarray(reward) * alive
+        alive = alive & ~np.asarray(terminated | truncated)
+        h = step + 1
+        if h in grid_set:
+            prefix_returns[h] = jnp.asarray(running.copy())
+
+    full_returns, _ = collect_parallel_episode(
+        pop_env,
+        next_key(run),
+        pop_policy,
+        run.buffer,
+        run.horizon,
+        on_step=capture_prefixes,
+    )
+    prefix_returns[run.horizon] = full_returns
+    return full_returns, prefix_returns
+
+
+def _update_adapt_state(
+    cfg: ERLConfig,
+    state: AdaptState,
+    full_a: jax.Array,
+    prefix_returns: dict[int, jax.Array],
+    full_b: jax.Array | None,
+) -> None:
+    if full_b is not None:
+        c_ab = float(spearman(full_a, full_b))
+        state.last_ceiling = 0.0 if np.isnan(c_ab) else c_ab
+
+    corrs = np.array(
+        [
+            0.0
+            if np.isnan(c := float(spearman(prefix_returns[h], full_a)))
+            else c
+            for h in state.grid
+        ],
+        dtype=np.float32,
+    )
+    state.cal_corrs.append(corrs)
+    if len(state.cal_corrs) > cfg.adapt_window:
+        state.cal_corrs = state.cal_corrs[-cfg.adapt_window :]
+    mean_corrs = np.mean(np.stack(state.cal_corrs, axis=0), axis=0)
+
+    if state.last_ceiling < cfg.adapt_min_ceiling:
+        r_vec = mean_corrs / max(abs(state.last_ceiling), 1e-6)
+        candidate_h = state.grid[0]
+    else:
+        r_vec = mean_corrs / state.last_ceiling
+        passing = [
+            h
+            for h, r_val in zip(state.grid, r_vec, strict=True)
+            if r_val >= cfg.adapt_r_threshold
+        ]
+        candidate_h = passing[0] if passing else state.grid[-1]
+    state.last_r_vec = r_vec
+
+    if state.calibration_count == 0:
+        state.current_h = candidate_h
+        state.pending_h = None
+    elif candidate_h == state.current_h:
+        state.pending_h = None
+    elif state.pending_h == candidate_h:
+        state.current_h = candidate_h
+        state.pending_h = None
+    else:
+        state.pending_h = candidate_h
+    state.calibration_count += 1
+
+
+def _adapt_prefix_generation(
+    run: Run,
+    rl_env: gym.vector.VectorEnv,
+    pop_env: gym.vector.VectorEnv,
+    state: AdaptState,
+    shadow_key: jax.Array,
+) -> Metrics:
+    cfg = run.cfg
+    flat_pop, pop_heads = ask_population(run)
+    warmup = len(run.buffer) < cfg.warmup_steps
+    online = run.td3_state.online
+
+    def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
+        return rl_policy_step(
+            online.embedding,
+            online.actor,
+            states,
+            act_key,
+            run.action_limit,
+            cfg.exploration_noise,
+            warmup,
+        )
+
+    def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
+        return heads_policy(online.embedding, pop_heads, states)
+
+    collect_parallel_episode(
+        rl_env, next_key(run), rl_policy, run.buffer, run.horizon
+    )
+
+    is_calibration = run.generation % cfg.adapt_interval == 0
+    if is_calibration:
+        need_ceiling = state.calibration_count % cfg.adapt_ceiling_every == 0
+        full_a, prefix_returns = _collect_calibration_rollout(
+            run, pop_env, pop_policy, state.grid
+        )
+        full_b: jax.Array | None = None
+        if need_ceiling:
+            full_b, _ = collect_parallel_episode(
+                pop_env, next_key(run), pop_policy, run.buffer, run.horizon
+            )
+        _update_adapt_state(cfg, state, full_a, prefix_returns, full_b)
+        n_cal_eps = 2 if need_ceiling else 1
+        pop_steps = cfg.pop_size * run.horizon * n_cal_eps
+        state.cal_overhead_steps += max(
+            0, pop_steps - cfg.pop_size * state.current_h
+        )
+        fitness = full_a
+        surr_for_metrics = prefix_returns[state.current_h]
+    else:
+        fitness, _ = collect_parallel_episode(
+            pop_env, next_key(run), pop_policy, run.buffer, state.current_h
+        )
+        pop_steps = cfg.pop_size * state.current_h
+        surr_for_metrics = fitness
+
+    gen_env_steps = run.horizon + pop_steps
+    run.env_steps += gen_env_steps
+    run.cem.tell(fitness, flat_pop)
+
+    h_idx = state.grid.index(state.current_h)
+    r_at_h = (
+        float(state.last_r_vec[h_idx]) if len(state.last_r_vec) > h_idx else 1.0
+    )
+    metrics: Metrics = {
+        "cost/real_frac": pop_steps / (cfg.pop_size * run.horizon),
+        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
+        "adapt/h": float(state.current_h),
+        "adapt/r_h": r_at_h,
+        "adapt/ceiling": float(state.last_ceiling),
+        "adapt/cal_steps": float(state.cal_overhead_steps),
+    }
+    for h_val, r_val in zip(state.grid, state.last_r_vec, strict=False):
+        metrics[f"adapt/r_{h_val}"] = float(r_val)
+
+    if not warmup:
+        if run.generation % cfg.shadow_interval == 0:
+            ep_key = jax.random.fold_in(shadow_key, run.generation)
+            shadow_truth, _ = collect_parallel_episode(
+                pop_env, ep_key, pop_policy, None, run.horizon
+            )
+            metrics |= to_floats(
+                selection_metrics(
+                    shadow_truth, fitness, surr_for_metrics, run.cem.parents
+                )
+            )
+        metrics |= train_and_merge(run, gen_env_steps)
+        if run.generation % cfg.rl_to_ea_sync_period == 0:
+            run.pending_injection = int(jnp.argmin(fitness))
+    return metrics
+
+
 def _validate_config(cfg: ERLConfig, horizon: int) -> None:
-    if cfg.prefix_steps is not None and cfg.screen_candidates is not None:
+    modes_set = (
+        int(cfg.prefix_steps is not None)
+        + int(cfg.prefix_adapt)
+        + int(cfg.screen_candidates is not None)
+    )
+    if modes_set > 1:
         raise ValueError(
-            "prefix_steps and screen_candidates cannot both be set"
+            "at most one of prefix_steps, prefix_adapt, or screen_candidates "
+            "may be set"
         )
     if cfg.prefix_steps is not None:
         if not 1 <= cfg.prefix_steps <= horizon:
             raise ValueError(
                 f"prefix_steps ({cfg.prefix_steps}) must be in [1, {horizon}]"
             )
-    elif cfg.h_steps > horizon:
+    elif not cfg.prefix_adapt and cfg.h_steps > horizon:
         raise ValueError(
             f"h_steps ({cfg.h_steps}) must be <= horizon ({horizon})"
+        )
+    if cfg.prefix_adapt and (
+        cfg.adapt_interval < 1
+        or cfg.adapt_ceiling_every < 1
+        or cfg.adapt_window < 1
+    ):
+        raise ValueError(
+            "adapt_interval, adapt_ceiling_every, and adapt_window must be >= 1"
         )
     if cfg.screen_candidates is not None and (
         cfg.screen_candidates < cfg.pop_size
@@ -666,8 +880,7 @@ def train(
         raise
 
     shadow_key = jax.random.key(cfg.seed + _SHADOW_KEY_OFFSET)
-    if cfg.prefix_steps is not None:
-        tag = f"prefix-h{cfg.prefix_steps}"
+    if cfg.prefix_steps is not None or cfg.prefix_adapt:
         rl_env = environments.make_vec_env(
             cfg.env_name, 1, async_=cfg.async_env, to_jax=True
         )
@@ -676,11 +889,29 @@ def train(
         )
         run.closers += [rl_env.close, pop_env.close]
 
-        def step_gen() -> Metrics:
-            assert cfg.prefix_steps is not None
-            return _prefix_generation(
-                run, rl_env, pop_env, cfg.prefix_steps, shadow_key
+        if cfg.prefix_adapt:
+            tag = "prefix-adapt"
+            grid = tuple(h for h in ADAPT_H_GRID if h < run.horizon) + (
+                run.horizon,
             )
+            adapt_state = AdaptState(
+                grid=grid,
+                current_h=run.horizon,
+                last_r_vec=np.ones(len(grid), dtype=np.float32),
+            )
+
+            def step_gen() -> Metrics:
+                return _adapt_prefix_generation(
+                    run, rl_env, pop_env, adapt_state, shadow_key
+                )
+        else:
+            tag = f"prefix-h{cfg.prefix_steps}"
+
+            def step_gen() -> Metrics:
+                assert cfg.prefix_steps is not None
+                return _prefix_generation(
+                    run, rl_env, pop_env, cfg.prefix_steps, shadow_key
+                )
     else:
         tag = (
             f"erl-screen{cfg.screen_candidates}"

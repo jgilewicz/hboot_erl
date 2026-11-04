@@ -56,6 +56,7 @@ CONDITIONS=(
   "prefix-h200|algorithm=erl algorithm.prefix_steps=200"
   "prefix-h100|algorithm=erl algorithm.prefix_steps=100"
   "erl-screen|algorithm=erl algorithm.screen_candidates=40"
+  "prefix-adapt|algorithm=erl algorithm.prefix_adapt=true"
 )
 SEEDS=(0 1 2 3 4)
 N_SEEDS=${#SEEDS[@]}
