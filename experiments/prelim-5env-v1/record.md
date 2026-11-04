@@ -1,5 +1,10 @@
 # prelim-5env-v1 record
 
+> [!NOTE]
+> **Status pakietu `fitness-budget-v1`:**
+> Wszystkie moduły pakietu `fitness-budget-v1` (Część 0: kontrakt logowania i checkpointing, ponowne runy HC/Hopper, A1: sweep $h$, A3: wierność na checkpointach, A2: nowe zadania 3.66M kroków) zostały **odroczone do czasu przydziału nowego grantu**.
+> W niniejszym eksperymencie (`prelim-5env-v1`) puszczamy **wyłącznie 27 zadań** na środowiskach held-out (`Walker2d-v5`, `Swimmer-v5`, `Ant-v5`) przy **re-użyciu 18 runów z HC/Hopper** z `prefix-calib-v1`/`prefix-adapt-v1`, **bez jakichkolwiek zmian w kodzie**.
+
 ## Plan & Pre-registration (2026-11-04)
 
 - **Cel:** Wstępne porównanie poglądowe dla promotora (nie do pracy): czy równy krótki prefiks $h=200$ bez krytyka bije SC-ERL (bramka losowa) i pełny ERL ($H=1000$) poza środowiskami deweloperskimi (`HalfCheetah-v5`, `Hopper-v5`), na trzech środowiskach held-out (`Walker2d-v5`, `Swimmer-v5`, `Ant-v5`).
@@ -81,19 +86,12 @@
 
 ---
 
-## Moduł A2 – Zmiana zakresu i bramka budżetowa
+## Moduł A2 – Wykres podglądowy z istniejących logów (nowe zadania i bramka odroczone)
 
-1. **Zakres A2 (jedna komórka zamiast 2×2):**
-   - Uruchamiamy wyłącznie komórkę **„ocena pełna / bufor pełny”** ($H=1000$) przy stałej liczbie generacji $G$ i aktualizacji TD3 $U$ pobranych z referencyjnego `prefix-h200` (dla $G=333$, $U \approx 10^6$).
-   - Środowiska: `HalfCheetah-v5`, `Hopper-v5`, `Walker2d-v5` (seedy 0–2 $\implies$ 9 zadań).
-   - Pozostałe komórki siatki 2×2 („ocena h200 / bufor pełny”, „ocena pełna / bufor h200”) zostają **odroczone (nie anulowane)**.
-2. **Warunek bramkowy startu A2:**
-   - A2 startuje ściśle po M, A1 i A3, **tylko jeśli saldo grantu po nich wynosi $\ge 308\text{ CPU-h}$** (szacowany koszt A2: 9 zadań $\times \sim 17.5\text{ CPU-h} \approx 158\text{ CPU-h} + 150\text{ CPU-h}$ rezerwy minimalnej).
-3. **Przybliżenie A2 z istniejących logów (bez nowych runów):**
-   - Wygenerowano wykres `eval_rl` vs numer generacji: [`a2_preview_eval_vs_generation.png`](plots/a2_preview_eval_vs_generation.png) ([SVG](plots/a2_preview_eval_vs_generation.svg)).
-   - *Status:* Wykres stanowi poglądowe przybliżenie A2 (pokazuje, że przy tej samej generacji $g=90$ prefix-h200 dorównuje ERL mimo 3.7× mniejszej liczby aktualizacji TD3 i kroków środowiska). Nie stanowi jednak formalnego wyniku A2, ponieważ w standardowym treningu $U$ narastało w różnym tempie na generację.
-4. **Hipoteza H7 (bez zmian):**
-   - Oceniana na pojedynczej komórce: różnica (ocena pełna − ocena h200) przy równych $G$ i $U$. Jeśli efekt oceny $< 5\%$ w $\ge 2/3$ środowisk, potwierdza to, że zysk prefiksu wynika z liczby generacji ewolucyjnych, a nie ze specyfiki skróconego horyzontu.
+- **Wykres podglądowy A2 (bez nowych runów):**
+  Wygenerowano wykres `eval_rl` vs numer generacji dla `prefix-h200` i `erl-log` na `HalfCheetah-v5` i `Hopper-v5`: [`a2_preview_eval_vs_generation.png`](plots/a2_preview_eval_vs_generation.png) ([SVG](plots/a2_preview_eval_vs_generation.svg)).
+- *Status:* Wykres stanowi poglądowe przybliżenie A2 (pokazuje, że przy tej samej generacji $g=90$ prefix-h200 dorównuje ERL mimo 3.7× mniejszej liczby aktualizacji TD3 i kroków środowiska). Nie stanowi jednak formalnego wyniku A2, ponieważ w standardowym treningu $U$ narastało w różnym tempie na generację.
+- *Decyzja:* Uruchomienie nowych runów dla A2 (komórka „ocena pełna / bufor pełny” przy stałych $G$ i $U$) oraz powiązana bramka budżetowa zostają **odroczone do czasu przydziału nowego grantu**.
 
 ---
 
@@ -101,6 +99,6 @@
 1. Tabela zbiorcza 5 środowisk × 3 warunki: średnia ± std, wyniki per seed, kolumny zysku $\Delta\%$ vs `sc_erl-random` i vs `erl`.
 2. Siatka 5 wykresów krzywych uczenia (średnia + min/max po 3 seedach).
 3. Tabela oszczędności kroków (Speedup, Step Savings, kroki do progu 100% `sc_erl-random`).
-4. Wykres i analiza A2 (przybliżenie z istniejących danych oraz wyniki po ewentualnym przejściu bramki budżetowej).
+4. Wykres podglądowy A2 + istniejące wykresy z `prefix-calib-v1` (wynik vs $h$, $\rho(h)$ w czasie z adnotacją, że $\rho$ liczone z tego samego epizodu). Bez dodatkowych runów.
 5. Rozliczenie zużycia CPU-h / GPU-h na klastrze.
 
