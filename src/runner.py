@@ -69,6 +69,7 @@ def _erl_kwargs(cfg: DictConfig) -> dict[str, Any]:
         else None,
         surrogate_batch=int(algo_cfg.surrogate_batch),
         shadow_interval=int(algo_cfg.shadow_interval),
+        log_prefixes=bool(algo_cfg.log_prefixes),
         eval_env_name=cfg.eval_env.id,
         eval_interval=int(cfg.eval.interval),
         eval_episodes=int(cfg.eval.episodes),

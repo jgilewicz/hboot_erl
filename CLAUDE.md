@@ -83,7 +83,7 @@ src/
 `slurm_run_array.sh` is the only slurm script: array-job-per-`(condition,
 seed)` for one `TARGET_ENV` — sac, ppo, td3, crossq, erl, sc_erl × 4 modes,
 3 σ-modes × `random_gate`, `prefix-h200`, `prefix-h100`, `erl-screen`,
-`prefix-adapt`, 16 × 5 = 80 tasks. `PROJECT_DIR` defaults to
+`prefix-adapt`, `prefix-h400`, `erl-log`, 18 × 5 = 90 tasks. `PROJECT_DIR` defaults to
 `SLURM_SUBMIT_DIR`. Jobs run `.venv/bin/python` directly — `uv sync` on
 the login node first; parallel `uv run` calls race on the shared uv cache.
 

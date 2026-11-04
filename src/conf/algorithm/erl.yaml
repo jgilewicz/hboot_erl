@@ -65,3 +65,4 @@ adapt_min_ceiling: 0.3
 screen_candidates: null
 surrogate_batch: 1024
 shadow_interval: 10
+log_prefixes: false

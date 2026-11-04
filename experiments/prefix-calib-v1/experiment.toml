@@ -1,0 +1,91 @@
+name = "prefix-calib-v1"
+question = "Does an environment-specific fixed prefix h in {100, 200, 400, 1000} beat fixed h=200 by >=5% on >=4/5 seeds in HalfCheetah-v5 or Hopper-v5 (Stage A ceiling), and if so, can a one-time K=3 generation calibration at T0 select h* cheaply on held-out Walker2d-v5 and Ant-v5 (Stage B)?"
+
+envs = ["HalfCheetah-v5", "Hopper-v5"]
+conditions = ["erl-log", "prefix-h100", "prefix-h200", "prefix-h400"]
+seeds = [0, 1, 2, 3, 4]
+total_steps = 1_000_000
+
+[wandb]
+entity = "evo_rl"
+project = "triage_erl"
+tag = "prefix-calib-v1"
+run_name = '^(?P<condition>.+)_(?P<env>[^_]+)_s(?P<seed>\d+)$'
+
+[metric]
+keys = ["perf/eval_rl", "eval_reward"]
+x = ["env_steps", "total_steps"]
+label = "eval return"
+final_window = 0.1
+
+[reference]
+condition = "erl-log"
+thresholds = [0.25, 0.5, 0.75, 0.9]
+
+[[comparisons]]
+a = "prefix-h100"
+b = "prefix-h200"
+question = "Fixed h=100 vs default h=200 across 5 seeds on HalfCheetah-v5 and Hopper-v5"
+
+[[comparisons]]
+a = "prefix-h400"
+b = "prefix-h200"
+question = "Fixed h=400 vs default h=200 across 5 seeds on HalfCheetah-v5 and Hopper-v5"
+
+[[comparisons]]
+a = "erl-log"
+b = "prefix-h200"
+question = "Full-horizon ERL (H=1000, erl-log) vs default h=200 across 5 seeds"
+
+[[comparisons]]
+a = "prefix-h200"
+b = "erl-log"
+question = "Default prefix h=200 vs full-horizon ERL (H=1000, erl-log)"
+
+[preregistration]
+primary_env = "Hopper-v5"
+primary = "Stage A ceiling: final MA(5) of perf/eval_rl across h in {100, 200, 400, 1000 (erl-log)} on HalfCheetah-v5 and Hopper-v5 (seeds 0..4), plus AUC of learning curve and env_steps to sc_erl-random final MA(5)"
+go = "Stage A -> Stage B GO iff in at least one env (HalfCheetah-v5 or Hopper-v5): h_best(env) != 200 (where h_best maximizes mean final MA(5)) AND h_best beats prefix-h200 in >= 4/5 paired seeds AND mean final MA(5) difference >= +5%. Offline on erl-log: for T0 in {50k, 100k} and K=3 generations, rho(h) = mean within-gen Spearman(prefix_h, return_1000); h* = min {h in {100, 200, 400}: rho(h) >= tau} else 400; freeze (tau in {0.8, 0.85, 0.9, 0.95}, T0) maximizing agreement h* == h_best across seeds and report stability (same h* in >= 4/5 seeds). Stage B (Walker2d-v5, Ant-v5, seeds 0..4, conditional on Stage A GO): GO iff prefix-calib >= prefix-h200 (mean final MA(5)) in both envs AND beats prefix-h200 by >= +3% in at least one env AND calibration overhead <= 5% of budget."
+no_go = "Stage A STOP if neither env satisfies (h_best != 200 AND >= 4/5 seeds win AND >= +5% mean gain): h=200 remains default and results are reported as h-insensitivity. Stage B NO-GO: h=200 remains default and one-shot calibration is reported as a negative result."
+report_only = ["AUC of perf/eval_rl curve per seed and condition", "env_steps to sc_erl-random final MA(5) (from existing runs)", "offline rho(h) over time and h* per seed from erl-log for T0 in {50k, 100k} and tau in {0.8, 0.85, 0.9, 0.95}", "prefix_log/ep_len_mean over time"]
+
+[[secondary]]
+key = "prefix_log/rho_50"
+label = "rho(50)"
+note = "within-generation Spearman(return_50, return_1000) in erl-log"
+
+[[secondary]]
+key = "prefix_log/rho_100"
+label = "rho(100)"
+note = "within-generation Spearman(return_100, return_1000) in erl-log"
+
+[[secondary]]
+key = "prefix_log/rho_200"
+label = "rho(200)"
+note = "within-generation Spearman(return_200, return_1000) in erl-log"
+
+[[secondary]]
+key = "prefix_log/rho_400"
+label = "rho(400)"
+note = "within-generation Spearman(return_400, return_1000) in erl-log"
+
+[[secondary]]
+key = "prefix_log/ep_len_mean"
+label = "mean episode length"
+note = "mean first-episode length of population individuals in erl-log"
+
+[[secondary]]
+key = "cost/real_frac"
+label = "real_frac"
+note = "share of horizon evaluated per individual (0.1, 0.2, 0.4, 1.0)"
+
+[[secondary]]
+key = "select/elite_overlap"
+label = "elite overlap (shadow)"
+note = "overlap with independent H=1000 truth"
+
+[cluster]
+ssh_host = "wcss"
+
+[report]
+url = ""

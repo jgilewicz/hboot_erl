@@ -87,6 +87,8 @@ class ERLConfig:
     surrogate_batch: int = 1024
     # shadow evaluation cadence (in generations) for prefix / screen metrics
     shadow_interval: int = 10
+    # erl-log: log per-individual cumulative returns at h in {50,100,200,400,1000} and episode length
+    log_prefixes: bool = False
 
     # deterministic RL-actor + CEM-elite eval, off the env-step budget
     eval_env_name: str | None = None  # None: env_name
@@ -380,7 +382,7 @@ def _rollout(
     vec_env: gym.vector.VectorEnv,
     pop_heads: ActorHead,
     warmup: bool,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, Metrics]:
     cfg = run.cfg
     embedding = run.td3_state.online.embedding
     actor = run.td3_state.online.actor
@@ -400,6 +402,12 @@ def _rollout(
     h_reward = np.zeros((cfg.pop_size + 1, cfg.h_steps), np.float32)
     h_done = np.zeros((cfg.pop_size + 1, cfg.h_steps), np.float32)
     h_state_box: list[jnp.ndarray] = []
+    running_ret = np.zeros(cfg.pop_size, dtype=np.float32)
+    alive_mask = np.ones(cfg.pop_size, dtype=bool)
+    ep_len = np.zeros(cfg.pop_size, dtype=np.int32)
+    prefix_snaps: dict[int, np.ndarray] = {}
+    grid = tuple(h for h in ADAPT_H_GRID if h < run.horizon) + (run.horizon,)
+    grid_set = set(grid)
 
     def capture_h_step(
         step: int,
@@ -408,6 +416,16 @@ def _rollout(
         truncated: jnp.ndarray,
         next_states: jnp.ndarray,
     ) -> None:
+        nonlocal running_ret, alive_mask, ep_len
+        if cfg.log_prefixes:
+            r_pop = np.asarray(reward[:-1], dtype=np.float32)
+            done_pop = np.asarray(terminated[:-1] | truncated[:-1], dtype=bool)
+            running_ret = running_ret + r_pop * alive_mask
+            ep_len = ep_len + alive_mask.astype(np.int32)
+            alive_mask = alive_mask & ~done_pop
+            h = step + 1
+            if h in grid_set:
+                prefix_snaps[h] = running_ret.copy()
         if step >= cfg.h_steps:
             return
         h_reward[:, step] = np.asarray(reward)
@@ -435,7 +453,24 @@ def _rollout(
         cfg.gamma,
         run.undiscount_scale,
     )
-    return returns[:-1], surrogate
+    truth = returns[:-1]
+    prefix_metrics: Metrics = {}
+    if cfg.log_prefixes:
+        prefix_snaps[run.horizon] = np.asarray(truth, dtype=np.float32)
+        for h in grid:
+            snap = prefix_snaps[h]
+            rho = float(spearman(jnp.asarray(snap), truth))
+            prefix_metrics[f"prefix_log/rho_{h}"] = (
+                0.0 if np.isnan(rho) else rho
+            )
+            for i in range(cfg.pop_size):
+                prefix_metrics[f"prefix_log/ind{i}_h{h}"] = float(snap[i])
+        prefix_metrics["prefix_log/ep_len_mean"] = float(ep_len.mean())
+        prefix_metrics["prefix_log/ep_len_min"] = float(ep_len.min())
+        prefix_metrics["prefix_log/ep_len_max"] = float(ep_len.max())
+        for i in range(cfg.pop_size):
+            prefix_metrics[f"prefix_log/ind{i}_ep_len"] = float(ep_len[i])
+    return truth, surrogate, prefix_metrics
 
 
 def _ask_screened_population(
@@ -537,7 +572,7 @@ def _generation(
             run, cfg.screen_candidates
         )
 
-    truth, surrogate = _rollout(run, vec_env, pop_heads, warmup)
+    truth, surrogate, prefix_metrics = _rollout(run, vec_env, pop_heads, warmup)
     use_real = warmup or bool(jax.random.bernoulli(next_key(run), cfg.theta))
     fitness = truth if use_real else surrogate
     run.cem.tell(fitness, flat_pop)
@@ -545,7 +580,7 @@ def _generation(
     metrics: Metrics = {
         "cost/real_frac": float(use_real),
         "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
-    }
+    } | prefix_metrics
     if not warmup:
         metrics |= to_floats(
             selection_metrics(truth, fitness, surrogate, run.cem.parents)
@@ -916,7 +951,7 @@ def train(
         tag = (
             f"erl-screen{cfg.screen_candidates}"
             if cfg.screen_candidates is not None
-            else "erl"
+            else ("erl-log" if cfg.log_prefixes else "erl")
         )
         vec_env = environments.make_vec_env(
             cfg.env_name, cfg.pop_size + 1, async_=cfg.async_env, to_jax=True
