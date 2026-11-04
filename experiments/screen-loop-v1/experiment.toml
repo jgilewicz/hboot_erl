@@ -68,6 +68,18 @@ note = "Spearman(mu, truth) across all 40 candidates"
 [cluster]
 ssh_host = "wcss"
 
+[[cluster.jobs]]
+id = 6235563
+label = "HalfCheetah-v5 (erl)"
+
+[[cluster.jobs]]
+id = 6235565
+label = "HalfCheetah-v5 (erl-screen)"
+
+[[cluster.jobs]]
+id = 6235566
+label = "dog-stand (erl, erl-screen)"
+
 [report]
 url = ""
 

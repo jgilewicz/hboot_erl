@@ -67,6 +67,14 @@ note = "mean CEM parameter std"
 [cluster]
 ssh_host = "wcss"
 
+[[cluster.jobs]]
+id = 6235563
+label = "HalfCheetah-v5 (erl)"
+
+[[cluster.jobs]]
+id = 6235564
+label = "HalfCheetah-v5 (sc_erl-random, prefix-h200, prefix-h100)"
+
 [report]
 url = ""
 
