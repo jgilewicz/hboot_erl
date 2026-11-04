@@ -55,6 +55,14 @@ def _erl_kwargs(cfg: DictConfig) -> dict[str, Any]:
         ea_tau=algo_cfg.ea_tau,
         theta=algo_cfg.theta,
         h_steps=algo_cfg.h_steps,
+        prefix_steps=int(algo_cfg.prefix_steps)
+        if algo_cfg.prefix_steps is not None
+        else None,
+        screen_candidates=int(algo_cfg.screen_candidates)
+        if algo_cfg.screen_candidates is not None
+        else None,
+        surrogate_batch=int(algo_cfg.surrogate_batch),
+        shadow_interval=int(algo_cfg.shadow_interval),
         eval_env_name=cfg.eval_env.id,
         eval_interval=int(cfg.eval.interval),
         eval_episodes=int(cfg.eval.episodes),
@@ -84,7 +92,6 @@ def _run_sc_erl(cfg: DictConfig) -> float:
         mad_k=algo_cfg.mad_k,
         beta=algo_cfg.beta,
         beta_lr=algo_cfg.beta_lr,
-        surrogate_batch=algo_cfg.surrogate_batch,
         mc_samples=algo_cfg.mc_samples,
         dropout_p=algo_cfg.dropout_p,
         k_ensembles=algo_cfg.k_ensembles,

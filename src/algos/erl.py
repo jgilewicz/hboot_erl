@@ -14,15 +14,21 @@ from jax.flatten_util import ravel_pytree
 
 import environments
 from common.critic_heads import CriticHead, make_head
-from common.metrics import selection_metrics
+from common.metrics import elite_overlap, selection_metrics, spearman
 from common.replay_buffer import Buffer
-from common.rollout import collect_parallel_episode, evaluate_heads
+from common.rollout import (
+    collect_parallel_episode,
+    evaluate_heads,
+    heads_policy,
+)
+from common.surrogate import population_stats
 from common.td3 import TD3Config, TD3State, TrainFn, init_td3, make_td3_train
 from common.utils import genetic_soft_update, h_step_bootstrap
 from modules.deep_modules import ActorHead, SharedStateEmbedding
-from modules.evo_module import CEM
+from modules.evo_module import CEM, _cem_ask
 
 Metrics = dict[str, float]
+_SHADOW_KEY_OFFSET = 40_000
 
 
 @dataclass(frozen=True)
@@ -62,9 +68,17 @@ class ERLConfig:
     ea_tau: float = 0.005
 
     # P(real full-episode fitness) per generation, else surrogate;
-    # EvoRainbow's inverse P(surrogate)=0.2 default.
-    theta: float = 0.6
+    # 1.0 = pure real evaluation (theta=0.6 was EvoRainbow's h-step coin flip).
+    theta: float = 1.0
     h_steps: int = 250
+
+    # short-prefix population evaluation (None = full horizon)
+    prefix_steps: int | None = None
+    # critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
+    screen_candidates: int | None = None
+    surrogate_batch: int = 1024
+    # shadow evaluation cadence (in generations) for prefix / screen metrics
+    shadow_interval: int = 10
 
     # deterministic RL-actor + CEM-elite eval, off the env-step budget
     eval_env_name: str | None = None  # None: env_name
@@ -277,6 +291,26 @@ def print_generation(run: Run, metrics: Metrics, tag: str) -> None:
 
 
 @eqx.filter_jit
+def rl_policy_step(
+    embedding: SharedStateEmbedding,
+    actor: ActorHead,
+    states: jnp.ndarray,
+    key: jax.Array,
+    action_limit: float,
+    exploration_noise: float,
+    warmup: bool,
+) -> jnp.ndarray:
+    raw = jax.vmap(lambda s: actor(embedding(s)))(states)
+    rl_key, warm_key = jax.random.split(key)
+    if warmup:
+        return jax.random.uniform(
+            warm_key, raw.shape, minval=-action_limit, maxval=action_limit
+        )
+    noise = jax.random.normal(rl_key, raw.shape) * exploration_noise
+    return jnp.clip(raw + noise, -action_limit, action_limit)
+
+
+@eqx.filter_jit
 def _step_policy(
     embedding: SharedStateEmbedding,
     pop_heads: ActorHead,
@@ -396,13 +430,104 @@ def _rollout(
     return returns[:-1], surrogate
 
 
-def _generation(run: Run, vec_env: gym.vector.VectorEnv) -> Metrics:
+def _ask_screened_population(
+    run: Run, candidates: int
+) -> tuple[jax.Array, ActorHead, jax.Array, jax.Array]:
+    cfg = run.cfg
+    cand_flat = _cem_ask(
+        next_key(run),
+        run.cem.mu,
+        run.cem.cov,
+        run.cem.scale,
+        candidates,
+    )
+    cand_heads = jax.vmap(run.unravel_head)(cand_flat)
+    states = run.buffer.sample(next_key(run), cfg.surrogate_batch)["state"]
+    mu, _ = population_stats(
+        run.head.stats,
+        run.td3_state.online.embedding,
+        run.td3_state.online.critic1,
+        cand_heads,
+        states,
+        next_key(run),
+    )
+    top_idx = jnp.argsort(-mu)[: cfg.pop_size]
+    flat_pop = cand_flat[top_idx]
+    if run.cem.elitisim:
+        flat_pop = flat_pop.at[-1].set(run.cem.elite)
+    if run.pending_injection is not None:
+        rl_flat, _ = ravel_pytree(run.td3_state.online.actor)
+        flat_pop = flat_pop.at[run.pending_injection].set(rl_flat)
+        run.pending_injection = None
+    return flat_pop, jax.vmap(run.unravel_head)(flat_pop), cand_flat, mu
+
+
+def _screen_shadow_metrics(
+    run: Run,
+    vec_env: gym.vector.VectorEnv,
+    cand_flat: jax.Array,
+    mu: jax.Array,
+    shadow_key: jax.Array,
+) -> Metrics:
+    # metric-only: evaluate all screened + rejected CEM candidates on
+    # independent episodes without touching the replay buffer or env_steps
+    cfg = run.cfg
+    pop_size = cfg.pop_size
+    n_blocks = cand_flat.shape[0] // pop_size
+    ep_key = jax.random.fold_in(shadow_key, run.generation)
+    block_keys = jax.random.split(ep_key, n_blocks)
+    embedding = run.td3_state.online.embedding
+    chunks = []
+    for b in range(n_blocks):
+        block_flat = cand_flat[b * pop_size : (b + 1) * pop_size]
+        padded_flat = jnp.concatenate([block_flat, block_flat[:1]], axis=0)
+        padded_heads = jax.vmap(run.unravel_head)(padded_flat)
+
+        def policy(
+            act_key: jax.Array,
+            states: jnp.ndarray,
+            heads: ActorHead = padded_heads,
+        ) -> jnp.ndarray:
+            return heads_policy(embedding, heads, states)
+
+        returns, _ = collect_parallel_episode(
+            vec_env, block_keys[b], policy, None, run.horizon
+        )
+        chunks.append(returns[:-1])
+
+    cand_truth = jnp.concatenate(chunks, axis=0)
+    top_mu = jnp.argsort(-mu)[:pop_size]
+    screened = cand_truth[top_mu]
+    blocks = cand_truth.reshape(n_blocks, pop_size)
+    parents = run.cem.parents
+    top_screened = jnp.sort(screened)[::-1][:parents].mean()
+    top_rand = jnp.sort(blocks, axis=1)[:, ::-1][:, :parents].mean()
+    return to_floats(
+        {
+            "screen/mean_gain": screened.mean() - cand_truth.mean(),
+            "screen/elite_gain": top_screened - top_rand,
+            "screen/overlap_top10": elite_overlap(mu, cand_truth, pop_size),
+            "screen/rank_corr": spearman(mu, cand_truth),
+        }
+    )
+
+
+def _generation(
+    run: Run, vec_env: gym.vector.VectorEnv, shadow_key: jax.Array
+) -> Metrics:
     cfg = run.cfg
     # ERL never truncates: every generation is the same fixed cost.
     gen_env_steps = run.horizon * (cfg.pop_size + 1)
     run.env_steps += gen_env_steps
-    flat_pop, pop_heads = ask_population(run)
     warmup = len(run.buffer) < cfg.warmup_steps
+    cand_flat: jax.Array | None = None
+    mu: jax.Array | None = None
+    if warmup or cfg.screen_candidates is None:
+        flat_pop, pop_heads = ask_population(run)
+    else:
+        flat_pop, pop_heads, cand_flat, mu = _ask_screened_population(
+            run, cfg.screen_candidates
+        )
 
     truth, surrogate = _rollout(run, vec_env, pop_heads, warmup)
     use_real = warmup or bool(jax.random.bernoulli(next_key(run), cfg.theta))
@@ -411,15 +536,116 @@ def _generation(run: Run, vec_env: gym.vector.VectorEnv) -> Metrics:
 
     metrics: Metrics = {
         "cost/real_frac": float(use_real),
+        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
     }
     if not warmup:
         metrics |= to_floats(
             selection_metrics(truth, fitness, surrogate, run.cem.parents)
         )
+        if (
+            cand_flat is not None
+            and mu is not None
+            and run.generation % cfg.shadow_interval == 0
+        ):
+            metrics |= _screen_shadow_metrics(
+                run, vec_env, cand_flat, mu, shadow_key
+            )
+        metrics |= train_and_merge(run, gen_env_steps)
+        if run.generation % cfg.rl_to_ea_sync_period == 0:
+            if cfg.screen_candidates is not None:
+                # flat_pop in the next generation is sorted by -mu with
+                # cem.elite at -1; replace the weakest non-elite slot
+                run.pending_injection = (
+                    cfg.pop_size - 2 if cfg.elitism else cfg.pop_size - 1
+                )
+            else:
+                run.pending_injection = int(jnp.argmin(fitness))
+    return metrics
+
+
+def _prefix_generation(
+    run: Run,
+    rl_env: gym.vector.VectorEnv,
+    pop_env: gym.vector.VectorEnv,
+    prefix_steps: int,
+    shadow_key: jax.Array,
+) -> Metrics:
+    cfg = run.cfg
+    flat_pop, pop_heads = ask_population(run)
+    warmup = len(run.buffer) < cfg.warmup_steps
+    online = run.td3_state.online
+
+    def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
+        return rl_policy_step(
+            online.embedding,
+            online.actor,
+            states,
+            act_key,
+            run.action_limit,
+            cfg.exploration_noise,
+            warmup,
+        )
+
+    def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
+        return heads_policy(online.embedding, pop_heads, states)
+
+    collect_parallel_episode(
+        rl_env, next_key(run), rl_policy, run.buffer, run.horizon
+    )
+    fitness, _ = collect_parallel_episode(
+        pop_env, next_key(run), pop_policy, run.buffer, prefix_steps
+    )
+    gen_env_steps = run.horizon + cfg.pop_size * prefix_steps
+    run.env_steps += gen_env_steps
+    run.cem.tell(fitness, flat_pop)
+
+    metrics: Metrics = {
+        "cost/real_frac": prefix_steps / run.horizon,
+        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
+    }
+    if not warmup:
+        if run.generation % cfg.shadow_interval == 0:
+            ep_key = jax.random.fold_in(shadow_key, run.generation)
+            shadow_truth, _ = collect_parallel_episode(
+                pop_env, ep_key, pop_policy, None, run.horizon
+            )
+            metrics |= to_floats(
+                selection_metrics(
+                    shadow_truth, fitness, fitness, run.cem.parents
+                )
+            )
         metrics |= train_and_merge(run, gen_env_steps)
         if run.generation % cfg.rl_to_ea_sync_period == 0:
             run.pending_injection = int(jnp.argmin(fitness))
     return metrics
+
+
+def _validate_config(cfg: ERLConfig, horizon: int) -> None:
+    if cfg.prefix_steps is not None and cfg.screen_candidates is not None:
+        raise ValueError(
+            "prefix_steps and screen_candidates cannot both be set"
+        )
+    if cfg.prefix_steps is not None:
+        if not 1 <= cfg.prefix_steps <= horizon:
+            raise ValueError(
+                f"prefix_steps ({cfg.prefix_steps}) must be in [1, {horizon}]"
+            )
+    elif cfg.h_steps > horizon:
+        raise ValueError(
+            f"h_steps ({cfg.h_steps}) must be <= horizon ({horizon})"
+        )
+    if cfg.screen_candidates is not None and (
+        cfg.screen_candidates < cfg.pop_size
+        or cfg.screen_candidates % cfg.pop_size != 0
+    ):
+        raise ValueError(
+            f"screen_candidates ({cfg.screen_candidates}) must be a positive "
+            f"multiple of pop_size ({cfg.pop_size})"
+        )
+    if cfg.shadow_interval < 1:
+        raise ValueError(
+            f"shadow_interval ({cfg.shadow_interval}) must be >= 1"
+        )
 
 
 def train(
@@ -433,24 +659,51 @@ def train(
             "random", obs_dim, action_dim, cfg.critic_hidden_dims
         ),
     )
-    if cfg.h_steps > run.horizon:
+    try:
+        _validate_config(cfg, run.horizon)
+    except ValueError:
         run.close()
-        raise ValueError(
-            f"h_steps ({cfg.h_steps}) must be <= horizon ({run.horizon})"
+        raise
+
+    shadow_key = jax.random.key(cfg.seed + _SHADOW_KEY_OFFSET)
+    if cfg.prefix_steps is not None:
+        tag = f"prefix-h{cfg.prefix_steps}"
+        rl_env = environments.make_vec_env(
+            cfg.env_name, 1, async_=cfg.async_env, to_jax=True
         )
-    vec_env = environments.make_vec_env(
-        cfg.env_name, cfg.pop_size + 1, async_=cfg.async_env, to_jax=True
-    )
-    run.closers.append(vec_env.close)
+        pop_env = environments.make_vec_env(
+            cfg.env_name, cfg.pop_size, async_=cfg.async_env, to_jax=True
+        )
+        run.closers += [rl_env.close, pop_env.close]
+
+        def step_gen() -> Metrics:
+            assert cfg.prefix_steps is not None
+            return _prefix_generation(
+                run, rl_env, pop_env, cfg.prefix_steps, shadow_key
+            )
+    else:
+        tag = (
+            f"erl-screen{cfg.screen_candidates}"
+            if cfg.screen_candidates is not None
+            else "erl"
+        )
+        vec_env = environments.make_vec_env(
+            cfg.env_name, cfg.pop_size + 1, async_=cfg.async_env, to_jax=True
+        )
+        run.closers.append(vec_env.close)
+
+        def step_gen() -> Metrics:
+            return _generation(run, vec_env, shadow_key)
+
     try:
         while run.env_steps < cfg.step_budget:
-            metrics = _generation(run, vec_env)
+            metrics = step_gen()
             metrics |= maybe_evaluate(run)
             metrics |= {
                 "generation": float(run.generation),
                 "env_steps": float(run.env_steps),
             }
-            print_generation(run, metrics, "erl")
+            print_generation(run, metrics, tag)
             if on_generation is not None:
                 on_generation(metrics)
             run.generation += 1

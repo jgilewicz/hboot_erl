@@ -14,7 +14,7 @@ outputs/
 multirun/
 wandb/
 
-notes.md
+*notes*
 
 # wcss-experiment: generated per experiment
 experiments/*/cache/

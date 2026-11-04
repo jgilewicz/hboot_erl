@@ -47,13 +47,15 @@ rl_to_ea_sync_period: 5
 ea_tau: 0.005
 
 # population fitness: coin flip per generation (real full-episode return
-# with probability theta, else a critic-bootstrap estimate). theta is
-# P(real), the inverse of EvoRainbow's P(surrogate) convention
-# (github.com/yeshenpy/EvoRainbow default 0.2, i.e. 0.8 here). Set to 0.6
-# so ERL and SEMARL share the same real/surrogate ratio for a controlled
-# comparison. h_steps costs nothing extra here - collect_parallel_episode
-# always rolls out the full horizon regardless of h_steps, this just
-# reads more of it - so it's set so gamma^h_steps (bootstrap weight) is
-# small (~10%) rather than dominating the surrogate with critic error.
-theta: 0.6
+# with probability theta, else a critic-bootstrap estimate). 1.0 = pure real
+# evaluation (0.6 was EvoRainbow's h-step coin flip, which §3.4 showed rolls
+# out the full horizon anyway and only degrades selection).
+theta: 1.0
 h_steps: 250
+
+# short-prefix population evaluation (null = full horizon)
+prefix_steps: null
+# critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
+screen_candidates: null
+surrogate_batch: 1024
+shadow_interval: 10

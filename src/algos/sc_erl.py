@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import equinox as eqx
 import gymnasium as gym
 import jax
 import jax.numpy as jnp
@@ -22,6 +21,7 @@ from algos.erl import (
     maybe_evaluate,
     next_key,
     print_generation,
+    rl_policy_step,
     to_floats,
     train_and_merge,
 )
@@ -38,7 +38,7 @@ from common.surrogate import (
     population_stats,
 )
 from common.td3 import TD3State
-from modules.deep_modules import ActorHead, SharedStateEmbedding
+from modules.deep_modules import ActorHead
 
 # CEM samples are iid, so slots are interchangeable; elitism owns slot -1
 _RL_SLOT = 0
@@ -113,26 +113,6 @@ class Surrogate:
     best_real_flat: jax.Array | None = None
     best_real_return: float = -np.inf
     pending_anchor: bool = False
-
-
-@eqx.filter_jit
-def _rl_policy(
-    embedding: SharedStateEmbedding,
-    actor: ActorHead,
-    states: jnp.ndarray,
-    key: jax.Array,
-    action_limit: float,
-    exploration_noise: float,
-    warmup: bool,
-) -> jnp.ndarray:
-    raw = jax.vmap(lambda s: actor(embedding(s)))(states)
-    rl_key, warm_key = jax.random.split(key)
-    if warmup:
-        return jax.random.uniform(
-            warm_key, raw.shape, minval=-action_limit, maxval=action_limit
-        )
-    noise = jax.random.normal(rl_key, raw.shape) * exploration_noise
-    return jnp.clip(raw + noise, -action_limit, action_limit)
 
 
 def _head_factory(cfg: SCERLConfig) -> Callable[[int, int], CriticHead]:
@@ -233,7 +213,7 @@ def _rollouts(
     online = run.td3_state.online
 
     def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
-        return _rl_policy(
+        return rl_policy_step(
             online.embedding,
             online.actor,
             states,

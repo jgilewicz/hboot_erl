@@ -1,7 +1,8 @@
 #!/bin/bash -l
 # One (condition, seed) pair per array task, for a single TARGET_ENV.
-# 12 conditions x 5 seeds = 60 tasks: SBX baselines, ERL, SC-ERL x 4 modes,
-# and the 3 uncertainty critics under a random gate (critic-vs-gate ablation).
+# 15 conditions x 5 seeds = 75 tasks: SBX baselines, ERL, SC-ERL x 4 modes,
+# the 3 uncertainty critics under a random gate (critic-vs-gate ablation),
+# short-prefix ERL (h=200, h=100) and critic-mu pre-screened ERL (40->10).
 #
 #   cd /path/to/usc_erl_jax && TARGET_ENV=HalfCheetah-v5 \
 #     sbatch --array=0-59 slurm_run_array.sh
@@ -52,6 +53,9 @@ CONDITIONS=(
   "sc_erl-dropout-rgate|algorithm=sc_erl algorithm.mode=dropout algorithm.random_gate=true"
   "sc_erl-ensemble-rgate|algorithm=sc_erl algorithm.mode=ensemble algorithm.random_gate=true"
   "sc_erl-evidential-rgate|algorithm=sc_erl algorithm.mode=evidential algorithm.random_gate=true"
+  "prefix-h200|algorithm=erl algorithm.prefix_steps=200"
+  "prefix-h100|algorithm=erl algorithm.prefix_steps=100"
+  "erl-screen|algorithm=erl algorithm.screen_candidates=40"
 )
 SEEDS=(0 1 2 3 4)
 N_SEEDS=${#SEEDS[@]}
@@ -78,8 +82,14 @@ VENV="${PROJECT_DIR}/.venv/bin"
 : "${WANDB_API_KEY:?export WANDB_API_KEY before submitting}"
 # online: runs are supervised live from wandb (compute nodes have internet)
 export WANDB_MODE="${WANDB_MODE:-online}"
-# per-run dir: a shared one makes every task re-sync every other task's run
-export WANDB_DIR="${PROJECT_DIR}/wandb_logs/${RUN_NAME}"
+# per-run dir: a shared one makes every task re-sync every other task's run;
+# prefer PD storage when available so $HOME (50 GB cap) does not fill up
+PD_ROOT="/lustre/pd03/${SLURM_JOB_ACCOUNT:-hpc-jakgil6519-1780267238}"
+if [[ -d "${PD_ROOT}" && -w "${PD_ROOT}" ]]; then
+  export WANDB_DIR="${PD_ROOT}/wandb_logs/${RUN_NAME}"
+else
+  export WANDB_DIR="${PROJECT_DIR}/wandb_logs/${RUN_NAME}"
+fi
 mkdir -p logs "${WANDB_DIR}"
 
 if "${VENV}/python" -m train \
