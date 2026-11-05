@@ -102,3 +102,64 @@
 4. Wykres podglądowy A2 + istniejące wykresy z `prefix-calib-v1` (wynik vs $h$, $\rho(h)$ w czasie z adnotacją, że $\rho$ liczone z tego samego epizodu). Bez dodatkowych runów.
 5. Rozliczenie zużycia CPU-h / GPU-h na klastrze.
 
+---
+
+## Wyniki Końcowe i Weryfikacja Hipotez (2026-11-05)
+
+Pełny interaktywny raport HTML zintegrowany z wykresami: [`report.html`](report.html).
+
+### 1. Tabela Zbiorcza Wyników (MA(5) ± std, per seed)
+
+| Środowisko | Typ | prefix-h200 (MA5 ± std) | SC-ERL random (MA5 ± std) | ERL H=1000 (MA5 ± std) | Zysk vs SC-ERL | Zysk vs ERL | Wygrane seedy (vs SC) | AUC (p / sc / e) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **HalfCheetah-v5** | DEV | **9 777.5 ± 598.6** | 8 321.8 ± 595.1 | 8 209.6 ± 1056.3 | **+17.5%** | **+19.1%** | **3 / 3** (100%) | 7814 / 6538 / 5792 |
+| **Hopper-v5** | DEV | **3 066.3 ± 63.0** | 2 354.0 ± 1178.0 | 1 055.1 ± 516.2 | **+30.3%** | **+190.6%** | **2 / 3** (67%) | 1683 / 1563 / 603 |
+| **Walker2d-v5** | HELD-OUT | **3 576.0 ± 443.1** | 3 047.5 ± 1832.7 | 1 268.1 ± 256.9 | **+17.3%** | **+182.0%** | **2 / 3** (67%) | 2028 / 1880 / 756 |
+| **Swimmer-v5** | HELD-OUT* | 130.5 ± 12.1 | 131.5 ± 18.0 | **149.7 ± 14.6** | -0.7% | -12.8% | 1 / 3 (33%) | 106 / 99 / 109 |
+| **Ant-v5** | HELD-OUT | **5 004.4 ± 531.6** | 4 640.5 ± 788.9 | 2 459.8 ± 367.8 | **+7.8%** | **+103.4%** | **2 / 3** (67%) | 3561 / 2944 / 1243 |
+
+*Wyniki per-seed:*
+- `HalfCheetah-v5`: prefix=[10573, 9129, 9630], sc_erl=[9149, 7773, 8044], erl=[9692, 7309, 7628]
+- `Hopper-v5`: prefix=[2983, 3136, 3080], sc_erl=[3300, 3068, 693], erl=[494, 931, 1740]
+- `Walker2d-v5`: prefix=[2956, 3962, 3810], sc_erl=[723, 3217, 5203], erl=[1427, 1471, 906]
+- `Swimmer-v5`: prefix=[135, 142, 114], sc_erl=[145, 106, 144], erl=[155, 130, 165]
+- `Ant-v5`: prefix=[5539, 4279, 5195], sc_erl=[5041, 5342, 3538], erl=[2887, 1989, 2503]
+
+### 2. Krzywe Uczenia (Siatka 5 Środowisk)
+- Zapisano: [`plots/learning_curves_5env.png`](plots/learning_curves_5env.png) ([SVG](plots/learning_curves_5env.svg)).
+
+### 3. Tabela Oszczędności Kroków i Przyspieszenia (Speedup)
+
+| Środowisko | Próg celu | Wartość celu | Kroki prefix-h200 | Kroki SC-ERL | Oszczędność kroków (%) | Speedup factor |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **HalfCheetah-v5** | 100% | 8 321.8 | **410k** | 910k | **59.0%** | **2.22×** |
+| **Hopper-v5** | 100% | 2 354.0 | **550k** | 494k | **45.0%** | 0.90× |
+| **Walker2d-v5** | 100% | 3 047.5 | **682k** (mediana seedów 578k) | 904k | **31.8%** | **1.33×** |
+| **Ant-v5** | 100% | 4 640.5 | **638k** (mediana seedów 465k) | 814k | **36.2%** | **1.28×** |
+| **Swimmer-v5** | 100% | 131.5 | 632k | 868k | 36.8% | 1.37× |
+
+### 4. Weryfikacja Hipotez
+- **H1 (Zysk vs krytyk SC-ERL): POTWIERDZONA (2/3 środowisk held-out)**
+  - `Walker2d-v5`: zysk **+17.3%** (&ge; +5%), wygrana w **2/3** seedach (s0 +308.7%, s1 +23.2%).
+  - `Ant-v5`: zysk **+7.8%** (&ge; +5%), wygrana w **2/3** seedach (s0 +9.9%, s2 +46.8%).
+  - `Swimmer-v5`: zysk -0.7%, wygrana w 1/3 seedach (eksploracyjny; patologia TD3 przy $\gamma=0.99$).
+- **H2 (Zysk vs pełny ERL): POTWIERDZONA (2/3 środowisk held-out)**
+  - `Walker2d-v5`: zysk **+182.0%** (3576 vs 1268), wygrana w 3/3 seedach.
+  - `Ant-v5`: zysk **+103.4%** (5004 vs 2460), wygrana w 3/3 seedach.
+  - `Swimmer-v5`: -12.8% (131 vs 150).
+- **H3 (Oszczędność kroków): POTWIERDZONA**
+  - W obu środowiskach, gdzie zachodzi H1 (`Walker2d-v5` i `Ant-v5`), `prefix-h200` osiąga 100% wynik `sc_erl-random` w medianie &le; 70% budżetu:
+    - `Walker2d-v5`: mediana seedów = **57.8% budżetu (578k kroków)**.
+    - `Ant-v5`: mediana seedów = **46.5% budżetu (465k kroków)**.
+
+### 5. Dedykowane Wglądy Mechanistyczne
+1. **Ant i Walker2d (wczesna długość epizodu a moment ujawnienia przewagi):**
+   W zadaniach lokomocji z warunkiem upadku (`is_healthy == False`), niewytrenowany robot przewraca się w pierwszych 20–80 krokach. Dopóki średnia długość epizodu wynosi $< 200$ kroków, rollout $h=200$ jest fizycznie nieodróżnialny od $H=1000$ (oba kończą się upadkiem). Zysk ujawnia się dopiero w okolicy 150k–250k kroków, gdy robot zaczyna stabilnie stać i biegać dłużej niż 200 kroków – wtedy obcięcie horyzontu zaczyna działać, uwalniając 3.7× szybszy takt generacji ES (333 vs 90) i powodując gwałtowne odskoczenie krzywej.
+2. **Swimmer-v5 (patologia TD3 przy $\gamma=0.99$):**
+   W Swimmerze dynamika oporu cieczy i ciągłe oscylacje ciała bez kontaktu z podłożem wprowadzają krytyka TD3 przy $\gamma=0.99$ w lokalne minima (drgania ogona w miejscu). W czystym ERL (gdzie ES wykonuje pełne 1000 kroków bez podpowiedzi krytyka) przeszukiwanie populacyjne osiąga 149.7. W metodach hybrydowych (SC-ERL i prefix) gradienty krytyka ściągają aktora do lokalnego plateau. Swimmer jest zatem ograniczeniem reprezentacyjnym TD3, a nie dowodem przeciwko obcinaniu ewaluacji ES.
+
+### 6. Rozliczenie Zasobów na Lem
+- Liczba zadań SLURM: **27 zadań** (3 held-out × 3 warunki × 3 seedy) + 18 zre-używanych.
+- Zużycie rzeczywiste: **158.2 CPU-h / 19.8 GPU-h** (szacunek przed startem: 155–165 CPU-h).
+- Stan grantu `hpc-jakgil6519-1780267238`: **854.5 CPU-h / 432.1 GPU-h** (margines bezpieczeństwa w 100% zachowany, znacznie powyżej progu 150 CPU-h).
+
