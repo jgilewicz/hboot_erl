@@ -121,7 +121,10 @@ else
   }
 fi
 
-: "${WANDB_API_KEY:?export WANDB_API_KEY before submitting}"
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+  export WANDB_API_KEY="$("${VENV}/python" -c 'import wandb; print(wandb.api.api_key or "")' 2>/dev/null || true)"
+fi
+: "${WANDB_API_KEY:?export WANDB_API_KEY before submitting or run wandb login}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 PD_ROOT="/lustre/pd03/${SLURM_JOB_ACCOUNT:-hpc-jakgil6519-1780267238}"
 if [[ -d "${PD_ROOT}" && -w "${PD_ROOT}" ]]; then

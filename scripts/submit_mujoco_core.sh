@@ -3,6 +3,10 @@
 # Conditions: erl, sc_erl-random, prefix-h200, prefix-td, hboot-td
 set -euo pipefail
 
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+  export WANDB_API_KEY="$(.venv/bin/python -c 'import wandb; print(wandb.api.api_key or "")' 2>/dev/null || true)"
+fi
+
 TAG="${TAG:-paper-core-v1}"
 ENVS=(
   "HalfCheetah-v5"
