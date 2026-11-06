@@ -1,5 +1,4 @@
 import json
-import os
 
 with open("experiments/prelim-5env-v1/summary_results.json") as f:
     data = json.load(f)
@@ -9,14 +8,14 @@ t_stats = data["threshold_stats"]
 hyps = data["hypotheses"]
 cluster = data["cluster_billing"]
 
-html_content = f"""<!DOCTYPE html>
+html_content = """<!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Raport prelim-5env-v1 – Ewaluacja prefiksu h=200 w ERL</title>
     <style>
-        :root {{
+        :root {
             --primary: #1e3a8a;
             --primary-light: #3b82f6;
             --secondary: #0f766e;
@@ -31,59 +30,59 @@ html_content = f"""<!DOCTYPE html>
             --danger: #b91c1c;
             --danger-bg: #fee2e2;
             --info-bg: #eff6ff;
-        }}
-        body {{
+        }
+        body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
             color: var(--text-main);
             background-color: var(--bg-body);
             margin: 0;
             padding: 24px;
-        }}
-        .container {{
+        }
+        .container {
             max-width: 1200px;
             margin: 0 auto;
-        }}
-        header {{
+        }
+        header {
             background: linear-gradient(135deg, #1e3a8a 0%, #0f766e 100%);
             color: white;
             padding: 32px;
             border-radius: 12px;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
             margin-bottom: 28px;
-        }}
-        header h1 {{
+        }
+        header h1 {
             margin: 0 0 10px 0;
             font-size: 28px;
             letter-spacing: -0.5px;
-        }}
-        header p {{
+        }
+        header p {
             margin: 0;
             opacity: 0.9;
             font-size: 15px;
-        }}
-        .badge {{
+        }
+        .badge {
             display: inline-block;
             padding: 4px 10px;
             border-radius: 9999px;
             font-size: 12px;
             font-weight: 600;
             text-transform: uppercase;
-        }}
-        .badge-success {{ background: var(--success-bg); color: var(--success); border: 1px solid #86efac; }}
-        .badge-danger {{ background: var(--danger-bg); color: var(--danger); border: 1px solid #fca5a5; }}
-        .badge-held {{ background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }}
-        .badge-dev {{ background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; }}
+        }
+        .badge-success { background: var(--success-bg); color: var(--success); border: 1px solid #86efac; }
+        .badge-danger { background: var(--danger-bg); color: var(--danger); border: 1px solid #fca5a5; }
+        .badge-held { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+        .badge-dev { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; }
         
-        .card {{
+        .card {
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: 10px;
             padding: 24px;
             margin-bottom: 28px;
             box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-        }}
-        .card h2 {{
+        }
+        .card h2 {
             margin-top: 0;
             font-size: 20px;
             border-bottom: 2px solid var(--border);
@@ -92,100 +91,100 @@ html_content = f"""<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: space-between;
-        }}
-        .grid-2 {{
+        }
+        .grid-2 {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 20px;
-        }}
-        @media (max-width: 860px) {{
-            .grid-2 {{ grid-template-columns: 1fr; }}
-        }}
-        .hypothesis-box {{
+        }
+        @media (max-width: 860px) {
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+        .hypothesis-box {
             padding: 16px;
             border-radius: 8px;
             background: #f1f5f9;
             border-left: 4px solid var(--primary-light);
             margin-bottom: 12px;
-        }}
-        .hypothesis-box.pass {{
+        }
+        .hypothesis-box.pass {
             background: #f0fdf4;
             border-left-color: var(--success);
-        }}
-        .table-responsive {{
+        }
+        .table-responsive {
             overflow-x: auto;
-        }}
-        table {{
+        }
+        table {
             width: 100%;
             border-collapse: collapse;
             font-size: 13.5px;
             text-align: left;
             margin: 14px 0;
-        }}
-        th, td {{
+        }
+        th, td {
             padding: 10px 12px;
             border-bottom: 1px solid var(--border);
-        }}
-        th {{
+        }
+        th {
             background-color: #f8fafc;
             font-weight: 600;
             color: var(--text-muted);
             text-transform: uppercase;
             font-size: 11.5px;
             letter-spacing: 0.5px;
-        }}
-        tr:hover {{
+        }
+        tr:hover {
             background-color: #f1f5f9;
-        }}
-        .highlight {{
+        }
+        .highlight {
             font-weight: 700;
             color: var(--primary);
-        }}
-        .gain-pos {{
+        }
+        .gain-pos {
             color: var(--success);
             font-weight: 600;
-        }}
-        .gain-neg {{
+        }
+        .gain-neg {
             color: var(--danger);
             font-weight: 600;
-        }}
-        .plot-container {{
+        }
+        .plot-container {
             text-align: center;
             margin: 20px 0;
-        }}
-        .plot-container img {{
+        }
+        .plot-container img {
             max-width: 100%;
             height: auto;
             border-radius: 8px;
             border: 1px solid var(--border);
             box-shadow: 0 2px 4px rgba(0,0,0,0.06);
-        }}
-        .plot-caption {{
+        }
+        .plot-caption {
             font-size: 13px;
             color: var(--text-muted);
             margin-top: 8px;
             font-style: italic;
-        }}
-        .callout {{
+        }
+        .callout {
             background-color: var(--info-bg);
             border-left: 4px solid var(--primary-light);
             padding: 16px;
             border-radius: 6px;
             font-size: 14px;
             margin: 16px 0;
-        }}
-        .callout-warning {{
+        }
+        .callout-warning {
             background-color: #fffbeb;
             border-left-color: var(--accent-orange);
-        }}
-        code {{
+        }
+        code {
             background: #e2e8f0;
             padding: 2px 5px;
             border-radius: 4px;
             font-size: 12.5px;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        }}
-        pre {{
+        }
+        pre {
             background: #0f172a;
             color: #f8fafc;
             padding: 16px;
@@ -193,7 +192,7 @@ html_content = f"""<!DOCTYPE html>
             overflow-x: auto;
             font-size: 12.5px;
             line-height: 1.5;
-        }}
+        }
     </style>
 </head>
 <body>

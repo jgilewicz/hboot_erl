@@ -117,6 +117,7 @@ def make_head(
         case "random":
             return CriticHead(plain, plain, plain_point, plain_loss, _no_sigma)
         case "ensemble":
+
             def ensemble(key: jax.Array) -> Critic:
                 return eqx.filter_vmap(plain)(
                     jax.random.split(key, k_ensembles)

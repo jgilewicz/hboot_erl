@@ -88,7 +88,9 @@ def _run_erl(cfg: DictConfig) -> float:
 def _run_sc_erl(cfg: DictConfig) -> float:
     # Maps sc_erl mode config into the unified erl runner
     mode = cfg.algorithm.get("mode", "random")
-    mapped_eval_mode = f"sc_erl_{mode}" if mode in ("random", "always") else mode
+    mapped_eval_mode = (
+        f"sc_erl_{mode}" if mode in ("random", "always") else mode
+    )
     kwargs = _erl_kwargs(cfg)
     kwargs["eval_mode"] = mapped_eval_mode
     td3_state = train_erl(ERLConfig(**kwargs), on_generation=wandb.log)

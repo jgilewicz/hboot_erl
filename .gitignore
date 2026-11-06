@@ -16,7 +16,4 @@ wandb/
 
 *notes*
 
-# wcss-experiment: generated per experiment
-experiments/*/cache/
-experiments/*/report.html
-experiments/*/record.md
+stan.md

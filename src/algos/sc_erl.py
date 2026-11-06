@@ -17,7 +17,9 @@ def train(
     *,
     on_generation: Callable[[Metrics], None] | None = None,
 ) -> TD3State:
-    eval_mode = f"sc_erl_{cfg.mode}" if cfg.mode in ("random", "always") else cfg.mode
+    eval_mode = (
+        f"sc_erl_{cfg.mode}" if cfg.mode in ("random", "always") else cfg.mode
+    )
     new_cfg = ERLConfig(
         **{
             k: v

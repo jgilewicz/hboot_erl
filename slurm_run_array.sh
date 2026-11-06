@@ -5,16 +5,24 @@
 #   - DMC Dog (5 envs): dm_control/dog-stand-v0, dog-walk-v0, dog-trot-v0, dog-run-v0, dog-fetch-v0
 #   - MyoSuite (5 envs): myoElbowPose1D6MRandom-v0, myoHandReachRandom-v0, myoHandPenTwirlRandom-v0, myoHandObjHoldRandom-v0, myoLegWalk-v0
 #
-# 12 Conditions x 10 Seeds (0-9) = 120 tasks per TARGET_ENV.
+# Modular Suites (controlled via SUITE env var, default: core):
+#   - SUITE=core (5 conditions x 10 seeds = 50 tasks, array 0-49):
+#       erl (full H=1000), sc_erl-random, prefix-h200, prefix-td, hboot-td
+#   - SUITE=ablation-horizon (4 conditions x 10 seeds = 40 tasks, array 0-39):
+#       prefix-h100, prefix-h400, prefix-h600, prefix-h800
+#   - SUITE=ablation-surrogate (5 conditions x 10 seeds = 50 tasks, array 0-49):
+#       prefix-random, hboot-h200, sc_erl-always, ensemble, semarl-td
+#   - SUITE=all (14 conditions x 10 seeds = 140 tasks, array 0-139)
+#
 # Task ID = condition_index * 10 + seed
 #
 # Example usage:
-#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-9 slurm_run_array.sh           # ERL baseline, all 10 seeds
-#   TARGET_ENV=HalfCheetah-v5 sbatch --array=20-29 slurm_run_array.sh         # prefix-h200, all 10 seeds
-#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-119 slurm_run_array.sh        # full matrix on one env
+#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-49 slurm_run_array.sh            # CORE suite (5 conds x 10 seeds)
+#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-9 slurm_run_array.sh             # ERL baseline only
+#   SUITE=all TARGET_ENV=HalfCheetah-v5 sbatch --array=0-139 slurm_run_array.sh # Full matrix
 
 #SBATCH -N 1
-#SBATCH -c 8
+#SBATCH -c 4
 #SBATCH --mem=16gb
 #SBATCH --time=0-12:00:00
 #SBATCH --job-name=erl-bench
@@ -29,24 +37,59 @@ ENV="${TARGET_ENV:?set TARGET_ENV, e.g. TARGET_ENV=HalfCheetah-v5}"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:?run sbatch from the checkout or set PROJECT_DIR}}"
 TOTAL_STEPS="${TOTAL_STEPS:-1_000_000}"
 TAG="${TAG:-paper-benchmark-v1}"
+SUITE="${SUITE:-core}"
 
-# Unified conditions: name|overrides
-CONDITIONS=(
-  "erl|algorithm=erl algorithm.eval_mode=full"
-  "prefix-h100|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=100"
-  "prefix-h200|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=200"
-  "prefix-h400|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=400"
-  "prefix-h600|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=600"
-  "prefix-h800|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=800"
-  "prefix-random|algorithm=erl algorithm.eval_mode=prefix_random"
-  "prefix-td|algorithm=erl algorithm.eval_mode=prefix_td"
-  "hboot-h200|algorithm=erl algorithm.eval_mode=hboot algorithm.prefix_steps=200"
-  "hboot-td|algorithm=erl algorithm.eval_mode=hboot_td"
-  "sc_erl-random|algorithm=erl algorithm.eval_mode=sc_erl_random algorithm.omega=0.79"
-  "sc_erl-always|algorithm=erl algorithm.eval_mode=sc_erl_always"
-  "ensemble|algorithm=erl algorithm.eval_mode=ensemble algorithm.k_ensembles=5"
-  "semarl-td|algorithm=erl algorithm.eval_mode=semarl_td algorithm.semarl_alpha=1.0 algorithm.semarl_beta=1.0"
-)
+# Define condition suites: name|overrides
+case "${SUITE}" in
+  core)
+    CONDITIONS=(
+      "erl|algorithm=erl algorithm.eval_mode=full"
+      "sc_erl-random|algorithm=erl algorithm.eval_mode=sc_erl_random algorithm.omega=0.79"
+      "prefix-h200|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=200"
+      "prefix-td|algorithm=erl algorithm.eval_mode=prefix_td"
+      "hboot-td|algorithm=erl algorithm.eval_mode=hboot_td"
+    )
+    ;;
+  ablation-horizon)
+    CONDITIONS=(
+      "prefix-h100|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=100"
+      "prefix-h400|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=400"
+      "prefix-h600|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=600"
+      "prefix-h800|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=800"
+    )
+    ;;
+  ablation-surrogate)
+    CONDITIONS=(
+      "prefix-random|algorithm=erl algorithm.eval_mode=prefix_random"
+      "hboot-h200|algorithm=erl algorithm.eval_mode=hboot algorithm.prefix_steps=200"
+      "sc_erl-always|algorithm=erl algorithm.eval_mode=sc_erl_always"
+      "ensemble|algorithm=erl algorithm.eval_mode=ensemble algorithm.k_ensembles=5"
+      "semarl-td|algorithm=erl algorithm.eval_mode=semarl_td algorithm.semarl_alpha=1.0 algorithm.semarl_beta=1.0"
+    )
+    ;;
+  all|full)
+    CONDITIONS=(
+      "erl|algorithm=erl algorithm.eval_mode=full"
+      "sc_erl-random|algorithm=erl algorithm.eval_mode=sc_erl_random algorithm.omega=0.79"
+      "prefix-h200|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=200"
+      "prefix-td|algorithm=erl algorithm.eval_mode=prefix_td"
+      "hboot-td|algorithm=erl algorithm.eval_mode=hboot_td"
+      "prefix-h100|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=100"
+      "prefix-h400|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=400"
+      "prefix-h600|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=600"
+      "prefix-h800|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=800"
+      "prefix-random|algorithm=erl algorithm.eval_mode=prefix_random"
+      "hboot-h200|algorithm=erl algorithm.eval_mode=hboot algorithm.prefix_steps=200"
+      "sc_erl-always|algorithm=erl algorithm.eval_mode=sc_erl_always"
+      "ensemble|algorithm=erl algorithm.eval_mode=ensemble algorithm.k_ensembles=5"
+      "semarl-td|algorithm=erl algorithm.eval_mode=semarl_td algorithm.semarl_alpha=1.0 algorithm.semarl_beta=1.0"
+    )
+    ;;
+  *)
+    echo "ERROR: Unknown SUITE '${SUITE}'. Choose from: core, ablation-horizon, ablation-surrogate, all" >&2
+    exit 1
+    ;;
+esac
 
 SEEDS=(0 1 2 3 4 5 6 7 8 9)
 N_SEEDS=${#SEEDS[@]}
@@ -94,7 +137,7 @@ if "${VENV}/python" -m train \
   env.id="${ENV}" \
   eval_env.id="${ENV}" \
   total_steps="${TOTAL_STEPS}" \
-  n_envs="${SLURM_CPUS_PER_TASK:-8}" \
+  n_envs="${SLURM_CPUS_PER_TASK:-4}" \
   wandb.enabled=true \
   "wandb.name=${RUN_NAME}" \
   "wandb.tags=[${TAG},${NAME},${ENV_SLUG}]" \

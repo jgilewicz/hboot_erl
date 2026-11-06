@@ -8,7 +8,13 @@ from gymnasium.wrappers import FlattenObservation
 
 from environments.base import EnvSpec, register_backend, register_env
 
-_DOG_TASKS = ("stand", "walk", "trot", "run")
+_DOG_TASKS: dict[str, int] = {
+    "stand": 223,
+    "walk": 223,
+    "trot": 223,
+    "run": 223,
+    "fetch": 232,
+}
 
 
 def _make(
@@ -43,13 +49,23 @@ def _make(
 
 
 register_backend("dmc", _make)
-for _task in _DOG_TASKS:
+for _task, _obs_dim in _DOG_TASKS.items():
     register_env(
         EnvSpec(
             name=f"dog-{_task}",
             backend="dmc",
             task_id=f"dog-{_task}",
-            expected_obs_dim=223,
+            expected_obs_dim=_obs_dim,
+            expected_act_dim=38,
+        )
+    )
+    # Also register dm_control/dog-*-v0 alias
+    register_env(
+        EnvSpec(
+            name=f"dm_control/dog-{_task}-v0",
+            backend="dmc",
+            task_id=f"dog-{_task}",
+            expected_obs_dim=_obs_dim,
             expected_act_dim=38,
         )
     )
