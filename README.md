@@ -74,7 +74,7 @@ All strategies are selected via the `algorithm.eval_mode` Hydra parameter:
 | `sc_erl_random` | Replay batch scoring; random gate ($\omega=0.79$) | Surrogate scoring + offset calibration | $\sim 21\%$ real rollouts |
 | `sc_erl_always` | 100% surrogate scoring after warmup | Full surrogate fitness | $0\%$ real steps |
 | `ensemble` | Ensemble critic ($K=5$) with MAD uncertainty gating | Epistemic $\sigma$ gate + LCB scoring | Varies with uncertainty |
-| `semarl_td` | SEMARL schedule: $p_{\text{surr}} = \operatorname{clip}(\alpha e^{-\beta \delta_{\text{ema}}}, p_{\min}, p_{\max})$ | TD-error adaptive surrogate gate | Adaptively decreases with error |
+| `semarl_td` | SEMARL schedule | TD-error adaptive surrogate gate | Adaptively decreases with error |
 
 ### Adaptive TD-Error Schedule (`resolve_adaptive_h`)
 ```python
