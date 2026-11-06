@@ -35,7 +35,9 @@ EvalMode = Literal[
     "full",
     "prefix",
     "prefix_random",
+    "prefix_td",
     "hboot",
+    "hboot_td",
     "sc_erl_random",
     "sc_erl_always",
     "ensemble",
@@ -43,6 +45,19 @@ EvalMode = Literal[
 ]
 EVAL_MODES: tuple[str, ...] = get_args(EvalMode)
 PREFIX_GRID: tuple[int, ...] = (100, 200, 400, 600, 800)
+
+
+def resolve_adaptive_h(
+    td_error_ema: float,
+    beta: float = 1.0,
+    grid: tuple[int, ...] = PREFIX_GRID,
+) -> int:
+    # Continuous monotonic mapping from running TD error to prefix horizon h:
+    # When error -> 0: h -> grid[0] (e.g. 100, trusting short horizon/critic)
+    # When error is large: h -> grid[-1] (e.g. 800, falling back to longer real rollout)
+    ratio = 1.0 - math.exp(-max(beta * td_error_ema, 0.0))
+    target_h = grid[0] + ratio * (grid[-1] - grid[0])
+    return min(grid, key=lambda g: abs(g - target_h))
 
 
 @dataclass(frozen=True)
@@ -400,8 +415,11 @@ def _step_generation(
         pop_steps = cfg.pop_size * run.horizon
         metrics["cost/real_frac"] = 1.0
 
-    elif mode in ("prefix", "prefix_random"):
-        if mode == "prefix_random":
+    elif mode in ("prefix", "prefix_random", "prefix_td"):
+        if mode == "prefix_td":
+            h = resolve_adaptive_h(run.td_error_ema, cfg.semarl_beta, cfg.prefix_grid)
+            metrics["prefix/h"] = float(h)
+        elif mode == "prefix_random":
             h_idx = int(jax.random.randint(next_key(run), (), 0, len(cfg.prefix_grid)))
             h = cfg.prefix_grid[h_idx]
             metrics["prefix/h"] = float(h)
@@ -414,8 +432,13 @@ def _step_generation(
         pop_steps = cfg.pop_size * h
         metrics["cost/real_frac"] = h / run.horizon
 
-    elif mode == "hboot":
-        h = cfg.prefix_steps or 200
+    elif mode in ("hboot", "hboot_td"):
+        if mode == "hboot_td":
+            h = resolve_adaptive_h(run.td_error_ema, cfg.semarl_beta, cfg.prefix_grid)
+            metrics["prefix/h"] = float(h)
+        else:
+            h = cfg.prefix_steps or 200
+
         # Capture step rewards and intermediate state at step h
         running_rew = np.zeros((cfg.pop_size, h), dtype=np.float32)
         running_done = np.zeros((cfg.pop_size, h), dtype=np.float32)
