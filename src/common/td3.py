@@ -17,7 +17,7 @@ from modules.deep_modules import ActorHead, Critic, SharedStateEmbedding
 class TD3Networks(NamedTuple):
     embedding: SharedStateEmbedding
     actor: ActorHead
-    # Critic, a (K,)-stacked Critic ensemble or an EvidentialCritic
+    # Critic or a (K,)-stacked Critic ensemble
     critic1: Any
     critic2: Critic
 
@@ -41,10 +41,10 @@ class TD3Config(NamedTuple):
 
 Batch = dict[str, jnp.ndarray]
 # (state, buffer data, buffer size, num_updates, key)
-#   -> (state, mean critic loss)
+#   -> (state, mean critic loss, mean absolute TD error)
 TrainFn = Callable[
     [TD3State, BufferData, jax.Array, jax.Array, jax.Array],
-    tuple[TD3State, jax.Array],
+    tuple[TD3State, jax.Array, jax.Array],
 ]
 
 
@@ -116,13 +116,17 @@ def _critic_update(
     state: TD3State,
     batch: Batch,
     key: jax.Array,
-) -> tuple[TD3State, jax.Array]:
-    target_key, k1, k2 = jax.random.split(key, 3)
+) -> tuple[TD3State, jax.Array, jax.Array]:
+    target_key, k1, k2, err_key = jax.random.split(key, 4)
     target_q = _td_target(cfg, head, state, batch, target_key)
+    s, a = batch["state"], batch["action"]
+
+    # Compute absolute Bellman TD error: delta = |r + gamma*Q_target - Q_online|
+    q1 = head.point(state.online.critic1, s, a, err_key)
+    td_error = jnp.mean(jnp.abs(target_q - q1))
 
     def loss_fn(critics: tuple[Any, Critic]) -> jax.Array:
         critic1, critic2 = critics
-        s, a = batch["state"], batch["action"]
         return head.loss(critic1, s, a, target_q, k1) + plain_loss(
             critic2, s, a, target_q, k2
         )
@@ -141,7 +145,7 @@ def _critic_update(
     new_state = state._replace(
         online=new_online, target=new_target, critic_opt_state=opt_state
     )
-    return new_state, loss
+    return new_state, loss, td_error
 
 
 def _actor_update(
@@ -193,16 +197,16 @@ def make_td3_train(
         size: jax.Array,
         num_updates: jax.Array,
         key: jax.Array,
-    ) -> tuple[TD3State, jax.Array]:
+    ) -> tuple[TD3State, jax.Array, jax.Array]:
         dynamic, static = eqx.partition(state, eqx.is_array)
 
         def body(
-            step: jax.Array, carry: tuple[Any, jax.Array, jax.Array]
-        ) -> tuple[Any, jax.Array, jax.Array]:
-            dynamic, key, critic_sum = carry
+            step: jax.Array, carry: tuple[Any, jax.Array, jax.Array, jax.Array]
+        ) -> tuple[Any, jax.Array, jax.Array, jax.Array]:
+            dynamic, key, critic_sum, td_err_sum = carry
             key, sample_key, critic_key, actor_key = jax.random.split(key, 4)
             batch = sample_batch(data, size, sample_key, cfg.batch_size)
-            state, critic_loss = _critic_update(
+            state, critic_loss, td_err = _critic_update(
                 cfg,
                 head,
                 critic_optimizer,
@@ -231,14 +235,16 @@ def make_td3_train(
                 skip,
                 eqx.filter(state, eqx.is_array),
             )
-            return dynamic, key, critic_sum + critic_loss
+            return dynamic, key, critic_sum + critic_loss, td_err_sum + td_err
 
-        dynamic, _, critic_sum = jax.lax.fori_loop(
-            0, num_updates, body, (dynamic, key, jnp.zeros(()))
+        dynamic, _, critic_sum, td_err_sum = jax.lax.fori_loop(
+            0, num_updates, body, (dynamic, key, jnp.zeros(()), jnp.zeros(()))
         )
+        norm_updates = jnp.maximum(num_updates, 1)
         return (
             eqx.combine(dynamic, static),
-            critic_sum / jnp.maximum(num_updates, 1),
+            critic_sum / norm_updates,
+            td_err_sum / norm_updates,
         )
 
     return train

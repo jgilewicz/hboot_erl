@@ -1,5 +1,5 @@
 defaults:
-  - algorithm: sac
+  - algorithm: erl
   - _self_
 
 seed: 0
@@ -8,9 +8,9 @@ n_envs: 1
 device: auto
 
 env:
-  id: Swimmer-v5
+  id: HalfCheetah-v5
 eval_env:
-  id: Swimmer-v5
+  id: HalfCheetah-v5
 
 eval:
   episodes: 5

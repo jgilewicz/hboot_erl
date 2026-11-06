@@ -5,30 +5,24 @@ from pathlib import Path
 from typing import Any, cast
 
 import wandb
-from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback
 
 from algos.erl import ERLConfig
 from algos.erl import evaluate_actor as evaluate_erl_actor
 from algos.erl import train as train_erl
-from algos.sc_erl import SCERLConfig
-from algos.sc_erl import train as train_sc_erl
 from baselines.agents import build_agent
 from baselines.envs import build_vec_env
 from baselines.wandb_logging import WandbLoggingCallback
-
-PROBE_FILE = "horizon_probe.npz"
 
 
 def _erl_kwargs(cfg: DictConfig) -> dict[str, Any]:
     algo_cfg = cfg.algorithm
     horizon = int(algo_cfg.horizon)
     pop_size = int(algo_cfg.pop_size)
-    return dict(
+    kwargs = dict(
         env_name=cfg.env.id,
         seed=cfg.seed,
-        # a budget, not a generation count: generation cost varies by algorithm
         step_budget=int(cfg.total_steps),
         horizon=horizon,
         async_env=algo_cfg.async_env,
@@ -53,27 +47,30 @@ def _erl_kwargs(cfg: DictConfig) -> dict[str, Any]:
         train_ratio=algo_cfg.train_ratio,
         rl_to_ea_sync_period=algo_cfg.rl_to_ea_sync_period,
         ea_tau=algo_cfg.ea_tau,
-        theta=algo_cfg.theta,
-        h_steps=algo_cfg.h_steps,
+        eval_mode=str(algo_cfg.get("eval_mode", "full")),
         prefix_steps=int(algo_cfg.prefix_steps)
-        if algo_cfg.prefix_steps is not None
+        if algo_cfg.get("prefix_steps") is not None
         else None,
-        prefix_adapt=bool(algo_cfg.prefix_adapt),
-        adapt_interval=int(algo_cfg.adapt_interval),
-        adapt_ceiling_every=int(algo_cfg.adapt_ceiling_every),
-        adapt_window=int(algo_cfg.adapt_window),
-        adapt_r_threshold=float(algo_cfg.adapt_r_threshold),
-        adapt_min_ceiling=float(algo_cfg.adapt_min_ceiling),
-        screen_candidates=int(algo_cfg.screen_candidates)
-        if algo_cfg.screen_candidates is not None
-        else None,
-        surrogate_batch=int(algo_cfg.surrogate_batch),
-        shadow_interval=int(algo_cfg.shadow_interval),
-        log_prefixes=bool(algo_cfg.log_prefixes),
+        omega=float(algo_cfg.get("omega", 0.79)),
+        k_ensembles=int(algo_cfg.get("k_ensembles", 5)),
+        surrogate_batch=int(algo_cfg.get("surrogate_batch", 1024)),
+        epsilon=float(algo_cfg.get("epsilon", 0.142)),
+        mad_k=float(algo_cfg.get("mad_k", 2.483)),
+        beta=float(algo_cfg.get("beta", 0.432)),
+        beta_lr=float(algo_cfg.get("beta_lr", 1e-3)),
+        semarl_alpha=float(algo_cfg.get("semarl_alpha", 1.0)),
+        semarl_beta=float(algo_cfg.get("semarl_beta", 1.0)),
+        semarl_p_min=float(algo_cfg.get("semarl_p_min", 0.0)),
+        semarl_p_max=float(algo_cfg.get("semarl_p_max", 0.9)),
+        semarl_ema_decay=float(algo_cfg.get("semarl_ema_decay", 0.1)),
+        shadow_interval=int(algo_cfg.get("shadow_interval", 10)),
         eval_env_name=cfg.eval_env.id,
         eval_interval=int(cfg.eval.interval),
         eval_episodes=int(cfg.eval.episodes),
     )
+    # Filter against ERLConfig fields
+    valid_fields = set(ERLConfig.__dataclass_fields__.keys())
+    return {k: v for k, v in kwargs.items() if k in valid_fields}
 
 
 def _run_erl(cfg: DictConfig) -> float:
@@ -89,25 +86,12 @@ def _run_erl(cfg: DictConfig) -> float:
 
 
 def _run_sc_erl(cfg: DictConfig) -> float:
-    algo_cfg = cfg.algorithm
-    sc_erl_cfg = SCERLConfig(
-        **_erl_kwargs(cfg),
-        mode=algo_cfg.mode,
-        random_gate=algo_cfg.random_gate,
-        omega=algo_cfg.omega,
-        epsilon=algo_cfg.epsilon,
-        mad_k=algo_cfg.mad_k,
-        beta=algo_cfg.beta,
-        beta_lr=algo_cfg.beta_lr,
-        mc_samples=algo_cfg.mc_samples,
-        dropout_p=algo_cfg.dropout_p,
-        k_ensembles=algo_cfg.k_ensembles,
-        evidential_lam=algo_cfg.evidential_lam,
-        probe_path=str(Path(HydraConfig.get().runtime.output_dir) / PROBE_FILE)
-        if algo_cfg.horizon_probe
-        else None,
-    )
-    td3_state = train_sc_erl(sc_erl_cfg, on_generation=wandb.log)
+    # Maps sc_erl mode config into the unified erl runner
+    mode = cfg.algorithm.get("mode", "random")
+    mapped_eval_mode = f"sc_erl_{mode}" if mode in ("random", "always") else mode
+    kwargs = _erl_kwargs(cfg)
+    kwargs["eval_mode"] = mapped_eval_mode
+    td3_state = train_erl(ERLConfig(**kwargs), on_generation=wandb.log)
     return evaluate_erl_actor(
         cfg.eval_env.id,
         td3_state,

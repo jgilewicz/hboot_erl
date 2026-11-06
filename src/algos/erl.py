@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, get_args
 
 import equinox as eqx
 import gymnasium as gym
@@ -21,15 +22,27 @@ from common.rollout import (
     evaluate_heads,
     heads_policy,
 )
-from common.surrogate import population_stats
+from common.surrogate import Calibrated, calibrate, gate, make_beta_step, population_stats
 from common.td3 import TD3Config, TD3State, TrainFn, init_td3, make_td3_train
 from common.utils import genetic_soft_update, h_step_bootstrap
 from modules.deep_modules import ActorHead, SharedStateEmbedding
-from modules.evo_module import CEM, _cem_ask
+from modules.evo_module import CEM
 
 Metrics = dict[str, float]
 _SHADOW_KEY_OFFSET = 40_000
-ADAPT_H_GRID: tuple[int, ...] = (50, 100, 200, 400, 1000)
+
+EvalMode = Literal[
+    "full",
+    "prefix",
+    "prefix_random",
+    "hboot",
+    "sc_erl_random",
+    "sc_erl_always",
+    "ensemble",
+    "semarl_td",
+]
+EVAL_MODES: tuple[str, ...] = get_args(EvalMode)
+PREFIX_GRID: tuple[int, ...] = (100, 200, 400, 600, 800)
 
 
 @dataclass(frozen=True)
@@ -68,29 +81,29 @@ class ERLConfig:
     rl_to_ea_sync_period: int = 5
     ea_tau: float = 0.005
 
-    # P(real full-episode fitness) per generation, else surrogate;
-    # 1.0 = pure real evaluation (theta=0.6 was EvoRainbow's h-step coin flip).
-    theta: float = 1.0
-    h_steps: int = 250
-
-    # short-prefix population evaluation (None = full horizon)
+    # Evaluation Mode & Baselines
+    eval_mode: str = "full"
     prefix_steps: int | None = None
-    # adaptive prefix h in {50, 100, 200, 400, 1000} calibrated every adapt_interval gens
-    prefix_adapt: bool = False
-    adapt_interval: int = 20
-    adapt_ceiling_every: int = 5
-    adapt_window: int = 3
-    adapt_r_threshold: float = 0.9
-    adapt_min_ceiling: float = 0.3
-    # critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
-    screen_candidates: int | None = None
-    surrogate_batch: int = 1024
-    # shadow evaluation cadence (in generations) for prefix / screen metrics
-    shadow_interval: int = 10
-    # erl-log: log per-individual cumulative returns at h in {50,100,200,400,1000} and episode length
-    log_prefixes: bool = False
+    prefix_grid: tuple[int, ...] = PREFIX_GRID
 
-    # deterministic RL-actor + CEM-elite eval, off the env-step budget
+    # Gated Surrogate Parameters (SC-ERL & SEMARL)
+    omega: float = 0.79  # P(surrogate) for sc_erl_random
+    k_ensembles: int = 5  # ensemble members for ensemble mode
+    surrogate_batch: int = 1024
+    epsilon: float = 0.142
+    mad_k: float = 2.483
+    beta: float = 0.432
+    beta_lr: float = 1e-3
+
+    # SEMARL Adaptive TD-error Gate: p_surr(delta) = clip(alpha * exp(-beta * delta), p_min, p_max)
+    semarl_alpha: float = 1.0
+    semarl_beta: float = 1.0
+    semarl_p_min: float = 0.0
+    semarl_p_max: float = 0.9
+    semarl_ema_decay: float = 0.1
+
+    # Diagnostics & Evaluation
+    shadow_interval: int = 10
     eval_env_name: str | None = None  # None: env_name
     eval_interval: int = 5_000
     eval_episodes: int = 5
@@ -98,95 +111,73 @@ class ERLConfig:
 
 @dataclass
 class Run:
-    # mutable per-run state shared by ERL and SC-ERL
     cfg: ERLConfig
-    horizon: int
     action_limit: float
-    buffer: Buffer
-    cem: CEM
-    unravel_head: Callable[[jax.Array], ActorHead]
+    horizon: int
+    undiscount_scale: float
     head: CriticHead
+    unravel_head: Callable[[jax.Array], ActorHead]
+    cem: CEM
     td3_state: TD3State
     train_td3: TrainFn
-    eval_env: gym.vector.VectorEnv
+    buffer: Buffer
     key: jax.Array
-    # projects discounted critic values onto the undiscounted return scale
-    undiscount_scale: float
-    env_steps: int = 0
-    generation: int = 0
-    next_eval: int = 0
-    pending_injection: int | None = None
     closers: list[Callable[[], None]] = field(default_factory=list)
+    generation: int = 0
+    env_steps: int = 0
+    pending_injection: int | None = None
+    # Running EMA of absolute TD-error (for semarl_td mode)
+    td_error_ema: float = 0.0
+    # Surrogate calibration state (for gated modes)
+    log_beta: jax.Array = field(default_factory=lambda: jnp.asarray(0.0))
+    beta_opt_state: Any = None
+    beta_step: Any = None
+    best_real_return: float = -float("inf")
+    best_real_flat: jax.Array | None = None
+    pending_anchor: bool = False
 
     def close(self) -> None:
-        for close in self.closers:
-            close()
+        for closer in self.closers:
+            closer()
 
 
 def env_dims(env_name: str, horizon: int | None) -> tuple[int, int, float, int]:
     env = environments.make_env(env_name)
     try:
-        obs_space, action_space = env.observation_space, env.action_space
-        if not isinstance(obs_space, gym.spaces.Box):
-            raise TypeError(f"{env_name}: expected a Box observation space")
-        if not isinstance(action_space, gym.spaces.Box):
-            raise TypeError(f"{env_name}: expected a Box action space")
-        obs_dim = int(obs_space.shape[0])
-        action_dim = int(action_space.shape[0])
-        low, high = action_space.low, action_space.high
-        if not (np.allclose(high, -low) and np.allclose(high, high[0])):
-            raise ValueError(
-                f"{env_name}: expected a symmetric, uniform action bound "
-                f"(all dims [-b, b]), got low={low}, high={high}"
-            )
-        action_limit = float(high[0])
-        if horizon is None:
-            if env.spec is None or env.spec.max_episode_steps is None:
-                raise ValueError(
-                    f"{env_name}: no max_episode_steps on env.spec; "
-                    "pass ERLConfig(horizon=...) explicitly"
-                )
-            horizon = env.spec.max_episode_steps
+        obs_dim = env.observation_space.shape[0]
+        action_dim = env.action_space.shape[0]
+        action_limit = float(env.action_space.high[0])
+        resolved_horizon = (
+            int(env.spec.max_episode_steps) if horizon is None else horizon
+        )
+        return obs_dim, action_dim, action_limit, resolved_horizon
     finally:
         env.close()
-    return obs_dim, action_dim, action_limit, horizon
 
 
 def build_run(
-    cfg: ERLConfig,
-    make_critic_head: Callable[[int, int], CriticHead],
+    cfg: ERLConfig, head_factory: Callable[[int, int], CriticHead]
 ) -> Run:
     obs_dim, action_dim, action_limit, horizon = env_dims(
         cfg.env_name, cfg.horizon
     )
+    undiscount_scale = (
+        horizon if cfg.gamma >= 1.0 else (1.0 - cfg.gamma**horizon) / (1.0 - cfg.gamma)
+    )
     key = jax.random.key(cfg.seed)
-    key, cem_key, td3_key = jax.random.split(key, 3)
+    key, td3_key, cem_key, buffer_key = jax.random.split(key, 4)
 
-    template = ActorHead(
-        cfg.embedding_dim, action_dim, key=cem_key, action_limit=action_limit
-    )
-    flat_template, unravel_head = ravel_pytree(template)
-    cem = CEM(
-        flat_template.shape[0],
-        cem_key,
-        sigma_init=cfg.sigma_init,
-        pop_size=cfg.pop_size,
-        damp=cfg.damp,
-        damp_limit=cfg.damp_limit,
-        elitisim=cfg.elitism,
-    )
-
-    head = make_critic_head(obs_dim, action_dim)
-    actor_optimizer = optax.adam(cfg.actor_lr)
-    critic_optimizer = optax.adam(cfg.critic_lr)
+    actor_opt = optax.adam(cfg.actor_lr)
+    critic_opt = optax.adam(cfg.critic_lr)
+    head = head_factory(obs_dim, action_dim)
     td3_state = init_td3(
         obs_dim,
         action_dim,
         cfg.embedding_dim,
         key=td3_key,
         head=head,
-        actor_optimizer=actor_optimizer,
-        critic_optimizer=critic_optimizer,
+        actor_optimizer=actor_opt,
+        critic_optimizer=critic_opt,
     )
     td3_cfg = TD3Config(
         gamma=cfg.gamma,
@@ -197,36 +188,46 @@ def build_run(
         policy_freq=cfg.policy_freq,
         batch_size=cfg.batch_size,
     )
-    eval_env = environments.make_vec_env(
-        cfg.eval_env_name or cfg.env_name,
-        2 * cfg.eval_episodes,
-        async_=cfg.async_env,
-        to_jax=True,
+    train_td3 = make_td3_train(td3_cfg, head, actor_opt, critic_opt)
+
+    sample_head = ActorHead(cfg.embedding_dim, action_dim, key=jax.random.key(0))
+    flat_sample, unravel_head = ravel_pytree(sample_head)
+    cem = CEM(
+        key=cem_key,
+        num_params=flat_sample.shape[0],
+        pop_size=cfg.pop_size,
+        sigma_init=cfg.sigma_init,
+        damp=cfg.damp,
+        damp_limit=cfg.damp_limit,
+        elitisim=cfg.elitism,
     )
+    buffer = Buffer(
+        capacity=cfg.buffer_capacity,
+        state_dim=obs_dim,
+        action_dim=action_dim,
+    )
+    beta_opt = optax.adam(cfg.beta_lr)
     return Run(
         cfg=cfg,
-        horizon=horizon,
         action_limit=action_limit,
-        buffer=Buffer(cfg.buffer_capacity, obs_dim, action_dim),
-        cem=cem,
-        unravel_head=unravel_head,
+        horizon=horizon,
+        undiscount_scale=undiscount_scale,
         head=head,
+        unravel_head=unravel_head,
+        cem=cem,
         td3_state=td3_state,
-        train_td3=make_td3_train(
-            td3_cfg, head, actor_optimizer, critic_optimizer
-        ),
-        eval_env=eval_env,
+        train_td3=train_td3,
+        buffer=buffer,
         key=key,
-        undiscount_scale=horizon
-        * (1.0 - cfg.gamma)
-        / (1.0 - cfg.gamma**horizon),
-        closers=[eval_env.close],
+        log_beta=jnp.asarray(math.log(max(cfg.beta, 1e-4))),
+        beta_opt_state=beta_opt.init(jnp.asarray(math.log(max(cfg.beta, 1e-4)))),
+        beta_step=make_beta_step(beta_opt),
     )
 
 
 def next_key(run: Run) -> jax.Array:
-    run.key, sub = jax.random.split(run.key)
-    return sub
+    run.key, k = jax.random.split(run.key)
+    return k
 
 
 def ask_population(run: Run) -> tuple[jax.Array, ActorHead]:
@@ -239,10 +240,8 @@ def ask_population(run: Run) -> tuple[jax.Array, ActorHead]:
 
 
 def train_and_merge(run: Run, gen_env_steps: int) -> Metrics:
-    # scales with steps actually collected: a fixed count inflates the
-    # replay ratio on cheap generations
     num_updates = int(run.cfg.train_ratio * gen_env_steps)
-    td3_state, critic_loss = run.train_td3(
+    td3_state, critic_loss, td_err = run.train_td3(
         run.td3_state,
         run.buffer.data,
         jnp.asarray(len(run.buffer)),
@@ -256,47 +255,43 @@ def train_and_merge(run: Run, gen_env_steps: int) -> Metrics:
     run.td3_state = td3_state._replace(
         online=td3_state.online._replace(actor=actor)
     )
+    # Update running EMA of absolute TD-error
+    decay = run.cfg.semarl_ema_decay
+    run.td_error_ema = (1.0 - decay) * run.td_error_ema + decay * float(td_err)
     return {
         "train/critic_loss": float(critic_loss),
+        "train/td_error": float(td_err),
+        "train/td_error_ema": float(run.td_error_ema),
     }
 
 
 def maybe_evaluate(run: Run) -> Metrics:
-    if run.env_steps < run.next_eval:
+    eval_env_name = run.cfg.eval_env_name or run.cfg.env_name
+    prev = run.env_steps - (
+        run.horizon + run.cfg.pop_size * (run.cfg.prefix_steps or run.horizon)
+    )
+    if prev // run.cfg.eval_interval == run.env_steps // run.cfg.eval_interval:
         return {}
-    run.next_eval = run.env_steps + run.cfg.eval_interval
-    heads = jax.tree.map(
-        lambda a, b: jnp.stack([a, b]) if eqx.is_array(a) else a,
-        run.td3_state.online.actor,
-        run.unravel_head(run.cem.elite),
+    r = evaluate_actor(
+        eval_env_name,
+        run.td3_state,
+        episodes=run.cfg.eval_episodes,
+        seed=run.cfg.seed + 10_000,
     )
-    # fixed key: every eval starts from the same initial states
-    rl, elite = evaluate_heads(
-        run.eval_env,
-        jax.random.key(run.cfg.seed + 10_000),
-        run.td3_state.online.embedding,
-        heads,
-        run.horizon,
-    )
-    return {"perf/eval_rl": float(rl), "perf/eval_elite": float(elite)}
-
-
-def to_floats(metrics: dict[str, Any]) -> Metrics:
-    return {k: float(v) for k, v in jax.device_get(metrics).items()}
+    return {"perf/eval_rl": r}
 
 
 def print_generation(run: Run, metrics: Metrics, tag: str) -> None:
-    def show(name: str, fmt: str = "8.1f") -> str:
-        value = metrics.get(name)
-        return "-" if value is None else format(value, fmt)
+    def show(key: str, fmt: str = ".1f") -> str:
+        return f"{metrics[key]:{fmt}}" if key in metrics else "n/a"
 
     print(
-        f"gen {run.generation:4d} | steps {run.env_steps:9d} | {tag} | "
-        f"real={show('cost/real_frac', '.2f')} | "
-        f"elite_ovl={show('select/elite_overlap', '.2f')} | "
-        f"eval_rl={show('perf/eval_rl')} "
-        f"eval_elite={show('perf/eval_elite')} | "
-        f"critic_loss={show('train/critic_loss', '.4f')}"
+        f"gen {run.generation:4d} | steps {run.env_steps:7d} | "
+        f"eval={show('perf/eval_rl')} | "
+        f"real_frac={show('cost/real_frac', '.2f')} | "
+        f"critic_loss={show('train/critic_loss', '.4f')} | "
+        f"td_err={show('train/td_error', '.3f')} (ema={show('train/td_error_ema', '.3f')}) | "
+        f"cem_std={show('screen/cem_std', '.4f')} | tag={tag}"
     )
 
 
@@ -305,56 +300,28 @@ def rl_policy_step(
     embedding: SharedStateEmbedding,
     actor: ActorHead,
     states: jnp.ndarray,
-    key: jax.Array,
+    act_key: jax.Array,
     action_limit: float,
     exploration_noise: float,
     warmup: bool,
 ) -> jnp.ndarray:
-    raw = jax.vmap(lambda s: actor(embedding(s)))(states)
-    rl_key, warm_key = jax.random.split(key)
-    if warmup:
-        return jax.random.uniform(
-            warm_key, raw.shape, minval=-action_limit, maxval=action_limit
-        )
-    noise = jax.random.normal(rl_key, raw.shape) * exploration_noise
-    return jnp.clip(raw + noise, -action_limit, action_limit)
+    noise_key, uniform_key = jax.random.split(act_key)
+    z = embedding(states[0])
+    action = actor(z)
+    noise = jax.random.normal(noise_key, action.shape) * exploration_noise
+    noisy_action = jnp.clip(action + noise, -action_limit, action_limit)
+    uniform_action = jax.random.uniform(
+        uniform_key, action.shape, minval=-action_limit, maxval=action_limit
+    )
+    return jnp.where(warmup, uniform_action, noisy_action)[None]
 
 
-@eqx.filter_jit
-def _step_policy(
-    embedding: SharedStateEmbedding,
-    pop_heads: ActorHead,
-    actor: ActorHead,
-    states: jnp.ndarray,
-    key: jax.Array,
-    action_limit: float,
-    exploration_noise: float,
-    warmup: bool,
-) -> jnp.ndarray:
-    z = jax.vmap(embedding)(states)
-    pop_actions = jax.vmap(lambda head, zi: head(zi))(pop_heads, z[:-1])
-
-    rl_key, warm_key = jax.random.split(key)
-    rl_raw = actor(z[-1])
-    if warmup:
-        rl_action = jax.random.uniform(
-            warm_key, rl_raw.shape, minval=-action_limit, maxval=action_limit
-        )
-    else:
-        noise = jax.random.normal(rl_key, rl_raw.shape) * exploration_noise
-        rl_action = jnp.clip(rl_raw + noise, -action_limit, action_limit)
-
-    return jnp.concatenate([pop_actions, rl_action[None]], axis=0)
-
-
-@eqx.filter_jit
 def _deterministic_action(
     embedding: SharedStateEmbedding, actor: ActorHead, state: jnp.ndarray
 ) -> jnp.ndarray:
     return actor(embedding(state))
 
 
-@eqx.filter_jit
 def _surrogate_fitness(
     embedding: SharedStateEmbedding,
     critic1: Any,
@@ -373,249 +340,22 @@ def _surrogate_fitness(
     q2 = jax.vmap(critic2)(h_state, own_actions)[..., 0]
     q_bootstrap = jnp.minimum(q1, q2)
     discounted = h_step_bootstrap(h_steps, gamma, h_reward, h_done, q_bootstrap)
-    # onto real_fitness's undiscounted scale; rank-preserving for CEM
     return discounted * undiscount_scale
 
 
-def _rollout(
-    run: Run,
-    vec_env: gym.vector.VectorEnv,
-    pop_heads: ActorHead,
-    warmup: bool,
-) -> tuple[jax.Array, jax.Array, Metrics]:
-    cfg = run.cfg
-    embedding = run.td3_state.online.embedding
-    actor = run.td3_state.online.actor
-
-    def policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
-        return _step_policy(
-            embedding,
-            pop_heads,
-            actor,
-            states,
-            act_key,
-            run.action_limit,
-            cfg.exploration_noise,
-            warmup,
-        )
-
-    h_reward = np.zeros((cfg.pop_size + 1, cfg.h_steps), np.float32)
-    h_done = np.zeros((cfg.pop_size + 1, cfg.h_steps), np.float32)
-    h_state_box: list[jnp.ndarray] = []
-    running_ret = np.zeros(cfg.pop_size, dtype=np.float32)
-    alive_mask = np.ones(cfg.pop_size, dtype=bool)
-    ep_len = np.zeros(cfg.pop_size, dtype=np.int32)
-    prefix_snaps: dict[int, np.ndarray] = {}
-    grid = tuple(h for h in ADAPT_H_GRID if h < run.horizon) + (run.horizon,)
-    grid_set = set(grid)
-
-    def capture_h_step(
-        step: int,
-        reward: jnp.ndarray,
-        terminated: jnp.ndarray,
-        truncated: jnp.ndarray,
-        next_states: jnp.ndarray,
-    ) -> None:
-        nonlocal running_ret, alive_mask, ep_len
-        if cfg.log_prefixes:
-            r_pop = np.asarray(reward[:-1], dtype=np.float32)
-            done_pop = np.asarray(terminated[:-1] | truncated[:-1], dtype=bool)
-            running_ret = running_ret + r_pop * alive_mask
-            ep_len = ep_len + alive_mask.astype(np.int32)
-            alive_mask = alive_mask & ~done_pop
-            h = step + 1
-            if h in grid_set:
-                prefix_snaps[h] = running_ret.copy()
-        if step >= cfg.h_steps:
-            return
-        h_reward[:, step] = np.asarray(reward)
-        h_done[:, step] = np.asarray(terminated)
-        if step == cfg.h_steps - 1:
-            h_state_box.append(next_states)
-
-    returns, _ = collect_parallel_episode(
-        vec_env,
-        next_key(run),
-        policy,
-        run.buffer,
-        run.horizon,
-        on_step=capture_h_step,
-    )
-    surrogate = _surrogate_fitness(
-        embedding,
-        run.td3_state.online.critic1,
-        run.td3_state.online.critic2,
-        pop_heads,
-        h_state_box[0][:-1],
-        jnp.asarray(h_reward[:-1]),
-        jnp.asarray(h_done[:-1]),
-        cfg.h_steps,
-        cfg.gamma,
-        run.undiscount_scale,
-    )
-    truth = returns[:-1]
-    prefix_metrics: Metrics = {}
-    if cfg.log_prefixes:
-        prefix_snaps[run.horizon] = np.asarray(truth, dtype=np.float32)
-        for h in grid:
-            snap = prefix_snaps[h]
-            rho = float(spearman(jnp.asarray(snap), truth))
-            prefix_metrics[f"prefix_log/rho_{h}"] = (
-                0.0 if np.isnan(rho) else rho
-            )
-            for i in range(cfg.pop_size):
-                prefix_metrics[f"prefix_log/ind{i}_h{h}"] = float(snap[i])
-        prefix_metrics["prefix_log/ep_len_mean"] = float(ep_len.mean())
-        prefix_metrics["prefix_log/ep_len_min"] = float(ep_len.min())
-        prefix_metrics["prefix_log/ep_len_max"] = float(ep_len.max())
-        for i in range(cfg.pop_size):
-            prefix_metrics[f"prefix_log/ind{i}_ep_len"] = float(ep_len[i])
-    return truth, surrogate, prefix_metrics
+# --- Unified Generation Step ---
 
 
-def _ask_screened_population(
-    run: Run, candidates: int
-) -> tuple[jax.Array, ActorHead, jax.Array, jax.Array]:
-    cfg = run.cfg
-    cand_flat = _cem_ask(
-        next_key(run),
-        run.cem.mu,
-        run.cem.cov,
-        run.cem.scale,
-        candidates,
-    )
-    cand_heads = jax.vmap(run.unravel_head)(cand_flat)
-    states = run.buffer.sample(next_key(run), cfg.surrogate_batch)["state"]
-    mu, _ = population_stats(
-        run.head.stats,
-        run.td3_state.online.embedding,
-        run.td3_state.online.critic1,
-        cand_heads,
-        states,
-        next_key(run),
-    )
-    top_idx = jnp.argsort(-mu)[: cfg.pop_size]
-    flat_pop = cand_flat[top_idx]
-    if run.cem.elitisim:
-        flat_pop = flat_pop.at[-1].set(run.cem.elite)
-    if run.pending_injection is not None:
-        rl_flat, _ = ravel_pytree(run.td3_state.online.actor)
-        flat_pop = flat_pop.at[run.pending_injection].set(rl_flat)
-        run.pending_injection = None
-    return flat_pop, jax.vmap(run.unravel_head)(flat_pop), cand_flat, mu
-
-
-def _screen_shadow_metrics(
-    run: Run,
-    vec_env: gym.vector.VectorEnv,
-    cand_flat: jax.Array,
-    mu: jax.Array,
-    shadow_key: jax.Array,
-) -> Metrics:
-    # metric-only: evaluate all screened + rejected CEM candidates on
-    # independent episodes without touching the replay buffer or env_steps
-    cfg = run.cfg
-    pop_size = cfg.pop_size
-    n_blocks = cand_flat.shape[0] // pop_size
-    ep_key = jax.random.fold_in(shadow_key, run.generation)
-    block_keys = jax.random.split(ep_key, n_blocks)
-    embedding = run.td3_state.online.embedding
-    chunks = []
-    for b in range(n_blocks):
-        block_flat = cand_flat[b * pop_size : (b + 1) * pop_size]
-        padded_flat = jnp.concatenate([block_flat, block_flat[:1]], axis=0)
-        padded_heads = jax.vmap(run.unravel_head)(padded_flat)
-
-        def policy(
-            act_key: jax.Array,
-            states: jnp.ndarray,
-            heads: ActorHead = padded_heads,
-        ) -> jnp.ndarray:
-            return heads_policy(embedding, heads, states)
-
-        returns, _ = collect_parallel_episode(
-            vec_env, block_keys[b], policy, None, run.horizon
-        )
-        chunks.append(returns[:-1])
-
-    cand_truth = jnp.concatenate(chunks, axis=0)
-    top_mu = jnp.argsort(-mu)[:pop_size]
-    screened = cand_truth[top_mu]
-    blocks = cand_truth.reshape(n_blocks, pop_size)
-    parents = run.cem.parents
-    top_screened = jnp.sort(screened)[::-1][:parents].mean()
-    top_rand = jnp.sort(blocks, axis=1)[:, ::-1][:, :parents].mean()
-    return to_floats(
-        {
-            "screen/mean_gain": screened.mean() - cand_truth.mean(),
-            "screen/elite_gain": top_screened - top_rand,
-            "screen/overlap_top10": elite_overlap(mu, cand_truth, pop_size),
-            "screen/rank_corr": spearman(mu, cand_truth),
-        }
-    )
-
-
-def _generation(
-    run: Run, vec_env: gym.vector.VectorEnv, shadow_key: jax.Array
-) -> Metrics:
-    cfg = run.cfg
-    # ERL never truncates: every generation is the same fixed cost.
-    gen_env_steps = run.horizon * (cfg.pop_size + 1)
-    run.env_steps += gen_env_steps
-    warmup = len(run.buffer) < cfg.warmup_steps
-    cand_flat: jax.Array | None = None
-    mu: jax.Array | None = None
-    if warmup or cfg.screen_candidates is None:
-        flat_pop, pop_heads = ask_population(run)
-    else:
-        flat_pop, pop_heads, cand_flat, mu = _ask_screened_population(
-            run, cfg.screen_candidates
-        )
-
-    truth, surrogate, prefix_metrics = _rollout(run, vec_env, pop_heads, warmup)
-    use_real = warmup or bool(jax.random.bernoulli(next_key(run), cfg.theta))
-    fitness = truth if use_real else surrogate
-    run.cem.tell(fitness, flat_pop)
-
-    metrics: Metrics = {
-        "cost/real_frac": float(use_real),
-        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
-    } | prefix_metrics
-    if not warmup:
-        metrics |= to_floats(
-            selection_metrics(truth, fitness, surrogate, run.cem.parents)
-        )
-        if (
-            cand_flat is not None
-            and mu is not None
-            and run.generation % cfg.shadow_interval == 0
-        ):
-            metrics |= _screen_shadow_metrics(
-                run, vec_env, cand_flat, mu, shadow_key
-            )
-        metrics |= train_and_merge(run, gen_env_steps)
-        if run.generation % cfg.rl_to_ea_sync_period == 0:
-            if cfg.screen_candidates is not None:
-                # flat_pop in the next generation is sorted by -mu with
-                # cem.elite at -1; replace the weakest non-elite slot
-                run.pending_injection = (
-                    cfg.pop_size - 2 if cfg.elitism else cfg.pop_size - 1
-                )
-            else:
-                run.pending_injection = int(jnp.argmin(fitness))
-    return metrics
-
-
-def _prefix_generation(
+def _step_generation(
     run: Run,
     rl_env: gym.vector.VectorEnv,
     pop_env: gym.vector.VectorEnv,
-    prefix_steps: int,
     shadow_key: jax.Array,
 ) -> Metrics:
     cfg = run.cfg
-    flat_pop, pop_heads = ask_population(run)
+    mode = cfg.eval_mode
     warmup = len(run.buffer) < cfg.warmup_steps
+    flat_pop, pop_heads = ask_population(run)
     online = run.td3_state.online
 
     def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
@@ -632,269 +372,168 @@ def _prefix_generation(
     def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
         return heads_policy(online.embedding, pop_heads, states)
 
-    collect_parallel_episode(
-        rl_env, next_key(run), rl_policy, run.buffer, run.horizon
-    )
-    fitness, _ = collect_parallel_episode(
-        pop_env, next_key(run), pop_policy, run.buffer, prefix_steps
-    )
-    gen_env_steps = run.horizon + cfg.pop_size * prefix_steps
-    run.env_steps += gen_env_steps
-    run.cem.tell(fitness, flat_pop)
-
-    metrics: Metrics = {
-        "cost/real_frac": prefix_steps / run.horizon,
-        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
-    }
-    if not warmup:
-        if run.generation % cfg.shadow_interval == 0:
-            ep_key = jax.random.fold_in(shadow_key, run.generation)
-            shadow_truth, _ = collect_parallel_episode(
-                pop_env, ep_key, pop_policy, None, run.horizon
-            )
-            metrics |= to_floats(
-                selection_metrics(
-                    shadow_truth, fitness, fitness, run.cem.parents
-                )
-            )
-        metrics |= train_and_merge(run, gen_env_steps)
-        if run.generation % cfg.rl_to_ea_sync_period == 0:
-            run.pending_injection = int(jnp.argmin(fitness))
-    return metrics
-
-
-@dataclass
-class AdaptState:
-    grid: tuple[int, ...]
-    current_h: int
-    pending_h: int | None = None
-    last_ceiling: float = 1.0
-    calibration_count: int = 0
-    cal_corrs: list[np.ndarray] = field(default_factory=list)
-    last_r_vec: np.ndarray = field(default_factory=lambda: np.ones(0))
-    cal_overhead_steps: int = 0
-
-
-def _collect_calibration_rollout(
-    run: Run,
-    pop_env: gym.vector.VectorEnv,
-    pop_policy: Callable[[jax.Array, jnp.ndarray], jnp.ndarray],
-    grid: tuple[int, ...],
-) -> tuple[jax.Array, dict[int, jax.Array]]:
-    running = np.zeros(run.cfg.pop_size, dtype=np.float32)
-    alive = np.ones(run.cfg.pop_size, dtype=bool)
-    prefix_returns: dict[int, jax.Array] = {}
-    grid_set = set(grid)
-
-    def capture_prefixes(
-        step: int,
-        reward: jnp.ndarray,
-        terminated: jnp.ndarray,
-        truncated: jnp.ndarray,
-        next_states: jnp.ndarray,
-    ) -> None:
-        nonlocal running, alive
-        running = running + np.asarray(reward) * alive
-        alive = alive & ~np.asarray(terminated | truncated)
-        h = step + 1
-        if h in grid_set:
-            prefix_returns[h] = jnp.asarray(running.copy())
-
-    full_returns, _ = collect_parallel_episode(
-        pop_env,
-        next_key(run),
-        pop_policy,
-        run.buffer,
-        run.horizon,
-        on_step=capture_prefixes,
-    )
-    prefix_returns[run.horizon] = full_returns
-    return full_returns, prefix_returns
-
-
-def _update_adapt_state(
-    cfg: ERLConfig,
-    state: AdaptState,
-    full_a: jax.Array,
-    prefix_returns: dict[int, jax.Array],
-    full_b: jax.Array | None,
-) -> None:
-    if full_b is not None:
-        c_ab = float(spearman(full_a, full_b))
-        state.last_ceiling = 0.0 if np.isnan(c_ab) else c_ab
-
-    corrs = np.array(
-        [
-            0.0
-            if np.isnan(c := float(spearman(prefix_returns[h], full_a)))
-            else c
-            for h in state.grid
-        ],
-        dtype=np.float32,
-    )
-    state.cal_corrs.append(corrs)
-    if len(state.cal_corrs) > cfg.adapt_window:
-        state.cal_corrs = state.cal_corrs[-cfg.adapt_window :]
-    mean_corrs = np.mean(np.stack(state.cal_corrs, axis=0), axis=0)
-
-    if state.last_ceiling < cfg.adapt_min_ceiling:
-        r_vec = mean_corrs / max(abs(state.last_ceiling), 1e-6)
-        candidate_h = state.grid[0]
-    else:
-        r_vec = mean_corrs / state.last_ceiling
-        passing = [
-            h
-            for h, r_val in zip(state.grid, r_vec, strict=True)
-            if r_val >= cfg.adapt_r_threshold
-        ]
-        candidate_h = passing[0] if passing else state.grid[-1]
-    state.last_r_vec = r_vec
-
-    if state.calibration_count == 0:
-        state.current_h = candidate_h
-        state.pending_h = None
-    elif candidate_h == state.current_h:
-        state.pending_h = None
-    elif state.pending_h == candidate_h:
-        state.current_h = candidate_h
-        state.pending_h = None
-    else:
-        state.pending_h = candidate_h
-    state.calibration_count += 1
-
-
-def _adapt_prefix_generation(
-    run: Run,
-    rl_env: gym.vector.VectorEnv,
-    pop_env: gym.vector.VectorEnv,
-    state: AdaptState,
-    shadow_key: jax.Array,
-) -> Metrics:
-    cfg = run.cfg
-    flat_pop, pop_heads = ask_population(run)
-    warmup = len(run.buffer) < cfg.warmup_steps
-    online = run.td3_state.online
-
-    def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
-        return rl_policy_step(
-            online.embedding,
-            online.actor,
-            states,
-            act_key,
-            run.action_limit,
-            cfg.exploration_noise,
-            warmup,
-        )
-
-    def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
-        return heads_policy(online.embedding, pop_heads, states)
-
+    # 1. RL actor always runs a full horizon rollout into the replay buffer
     collect_parallel_episode(
         rl_env, next_key(run), rl_policy, run.buffer, run.horizon
     )
 
-    is_calibration = run.generation % cfg.adapt_interval == 0
-    if is_calibration:
-        need_ceiling = state.calibration_count % cfg.adapt_ceiling_every == 0
-        full_a, prefix_returns = _collect_calibration_rollout(
-            run, pop_env, pop_policy, state.grid
-        )
-        full_b: jax.Array | None = None
-        if need_ceiling:
-            full_b, _ = collect_parallel_episode(
-                pop_env, next_key(run), pop_policy, run.buffer, run.horizon
-            )
-        _update_adapt_state(cfg, state, full_a, prefix_returns, full_b)
-        n_cal_eps = 2 if need_ceiling else 1
-        pop_steps = cfg.pop_size * run.horizon * n_cal_eps
-        state.cal_overhead_steps += max(
-            0, pop_steps - cfg.pop_size * state.current_h
-        )
-        fitness = full_a
-        surr_for_metrics = prefix_returns[state.current_h]
-    else:
+    metrics: Metrics = {}
+
+    # 2. Warmup: everyone runs full rollout to seed the replay buffer
+    if warmup:
         fitness, _ = collect_parallel_episode(
-            pop_env, next_key(run), pop_policy, run.buffer, state.current_h
+            pop_env, next_key(run), pop_policy, run.buffer, run.horizon
         )
-        pop_steps = cfg.pop_size * state.current_h
-        surr_for_metrics = fitness
+        gen_env_steps = run.horizon * (cfg.pop_size + 1)
+        run.env_steps += gen_env_steps
+        run.cem.tell(fitness, flat_pop)
+        return {
+            "cost/real_frac": 1.0,
+            "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
+        }
+
+    # 3. Dispatched Population Evaluation based on mode
+    if mode == "full":
+        fitness, _ = collect_parallel_episode(
+            pop_env, next_key(run), pop_policy, run.buffer, run.horizon
+        )
+        pop_steps = cfg.pop_size * run.horizon
+        metrics["cost/real_frac"] = 1.0
+
+    elif mode in ("prefix", "prefix_random"):
+        if mode == "prefix_random":
+            h_idx = int(jax.random.randint(next_key(run), (), 0, len(cfg.prefix_grid)))
+            h = cfg.prefix_grid[h_idx]
+            metrics["prefix/h"] = float(h)
+        else:
+            h = cfg.prefix_steps or 200
+
+        fitness, _ = collect_parallel_episode(
+            pop_env, next_key(run), pop_policy, run.buffer, h
+        )
+        pop_steps = cfg.pop_size * h
+        metrics["cost/real_frac"] = h / run.horizon
+
+    elif mode == "hboot":
+        h = cfg.prefix_steps or 200
+        # Capture step rewards and intermediate state at step h
+        running_rew = np.zeros((cfg.pop_size, h), dtype=np.float32)
+        running_done = np.zeros((cfg.pop_size, h), dtype=np.float32)
+        final_state = np.zeros((cfg.pop_size, rl_env.single_observation_space.shape[0]), dtype=np.float32)
+
+        def capture_step(step: int, reward: jnp.ndarray, term: jnp.ndarray, trunc: jnp.ndarray, next_states: jnp.ndarray) -> None:
+            running_rew[:, step] = np.asarray(reward)
+            running_done[:, step] = np.asarray(term)
+            if step == h - 1:
+                final_state[:] = np.asarray(next_states)
+
+        collect_parallel_episode(
+            pop_env, next_key(run), pop_policy, run.buffer, h, on_step=capture_step
+        )
+        fitness = _surrogate_fitness(
+            online.embedding,
+            online.critic1,
+            online.critic2,
+            pop_heads,
+            jnp.asarray(final_state),
+            jnp.asarray(running_rew),
+            jnp.asarray(running_done),
+            h,
+            cfg.gamma,
+            run.undiscount_scale,
+        )
+        pop_steps = cfg.pop_size * h
+        metrics["cost/real_frac"] = h / run.horizon
+
+    elif mode in ("sc_erl_random", "sc_erl_always", "ensemble", "semarl_td"):
+        # Surrogate scoring on replay states
+        states = run.buffer.sample(next_key(run), cfg.surrogate_batch)["state"]
+        mu, sigma = population_stats(
+            run.head.stats,
+            online.embedding,
+            online.critic1,
+            pop_heads,
+            states,
+            next_key(run),
+        )
+
+        # Gating decisions
+        if mode == "sc_erl_always":
+            real = jnp.zeros(cfg.pop_size, dtype=bool)
+            p_surr = 1.0
+        elif mode == "sc_erl_random":
+            coin = jax.random.uniform(next_key(run), (cfg.pop_size,))
+            real = coin > cfg.omega
+            p_surr = cfg.omega
+        elif mode == "ensemble":
+            decision = gate(
+                mu, sigma, next_key(run), cfg.omega, cfg.epsilon, cfg.mad_k, True
+            )
+            real = decision.real
+            p_surr = 1.0 - float(jnp.mean(real))
+        elif mode == "semarl_td":
+            # SEMARL Exponential schedule: p_surr = clip(alpha * exp(-beta * delta_ema), p_min, p_max)
+            p_surr = float(
+                np.clip(
+                    cfg.semarl_alpha * math.exp(-cfg.semarl_beta * run.td_error_ema),
+                    cfg.semarl_p_min,
+                    cfg.semarl_p_max,
+                )
+            )
+            coin = jax.random.uniform(next_key(run), (cfg.pop_size,))
+            real = coin > p_surr
+
+        metrics["p_surr"] = float(p_surr)
+        n_real = int(jnp.sum(real))
+
+        # Rollout for real-gated individuals only
+        if n_real > 0:
+            observed, _ = collect_parallel_episode(
+                pop_env,
+                next_key(run),
+                pop_policy,
+                run.buffer,
+                run.horizon,
+                store_mask=np.asarray(real),
+            )
+            calibrated = calibrate(
+                observed,
+                real,
+                mu,
+                sigma,
+                run.log_beta,
+                run.undiscount_scale,
+            )
+            fitness = calibrated.fitness
+            pop_steps = n_real * run.horizon
+        else:
+            # Fully surrogate generation: 0 environment steps spent
+            fitness = run.undiscount_scale * (mu - jnp.exp(run.log_beta) * sigma)
+            pop_steps = 0
+
+        metrics["cost/real_frac"] = n_real / cfg.pop_size
+
+    else:
+        raise ValueError(f"Unknown eval_mode: {mode!r}; choose from {EVAL_MODES}")
 
     gen_env_steps = run.horizon + pop_steps
     run.env_steps += gen_env_steps
     run.cem.tell(fitness, flat_pop)
 
-    h_idx = state.grid.index(state.current_h)
-    r_at_h = (
-        float(state.last_r_vec[h_idx]) if len(state.last_r_vec) > h_idx else 1.0
-    )
-    metrics: Metrics = {
-        "cost/real_frac": pop_steps / (cfg.pop_size * run.horizon),
-        "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
-        "adapt/h": float(state.current_h),
-        "adapt/r_h": r_at_h,
-        "adapt/ceiling": float(state.last_ceiling),
-        "adapt/cal_steps": float(state.cal_overhead_steps),
-    }
-    for h_val, r_val in zip(state.grid, state.last_r_vec, strict=False):
-        metrics[f"adapt/r_{h_val}"] = float(r_val)
+    metrics["screen/cem_std"] = float(jnp.sqrt(run.cem.cov).mean())
+    metrics |= train_and_merge(run, gen_env_steps)
 
-    if not warmup:
-        if run.generation % cfg.shadow_interval == 0:
-            ep_key = jax.random.fold_in(shadow_key, run.generation)
-            shadow_truth, _ = collect_parallel_episode(
-                pop_env, ep_key, pop_policy, None, run.horizon
-            )
-            metrics |= to_floats(
-                selection_metrics(
-                    shadow_truth, fitness, surr_for_metrics, run.cem.parents
-                )
-            )
-        metrics |= train_and_merge(run, gen_env_steps)
-        if run.generation % cfg.rl_to_ea_sync_period == 0:
-            run.pending_injection = int(jnp.argmin(fitness))
+    if run.generation % cfg.rl_to_ea_sync_period == 0:
+        run.pending_injection = int(jnp.argmin(fitness))
+
     return metrics
 
 
-def _validate_config(cfg: ERLConfig, horizon: int) -> None:
-    modes_set = (
-        int(cfg.prefix_steps is not None)
-        + int(cfg.prefix_adapt)
-        + int(cfg.screen_candidates is not None)
-    )
-    if modes_set > 1:
-        raise ValueError(
-            "at most one of prefix_steps, prefix_adapt, or screen_candidates "
-            "may be set"
-        )
-    if cfg.prefix_steps is not None:
-        if not 1 <= cfg.prefix_steps <= horizon:
-            raise ValueError(
-                f"prefix_steps ({cfg.prefix_steps}) must be in [1, {horizon}]"
-            )
-    elif not cfg.prefix_adapt and cfg.h_steps > horizon:
-        raise ValueError(
-            f"h_steps ({cfg.h_steps}) must be <= horizon ({horizon})"
-        )
-    if cfg.prefix_adapt and (
-        cfg.adapt_interval < 1
-        or cfg.adapt_ceiling_every < 1
-        or cfg.adapt_window < 1
-    ):
-        raise ValueError(
-            "adapt_interval, adapt_ceiling_every, and adapt_window must be >= 1"
-        )
-    if cfg.screen_candidates is not None and (
-        cfg.screen_candidates < cfg.pop_size
-        or cfg.screen_candidates % cfg.pop_size != 0
-    ):
-        raise ValueError(
-            f"screen_candidates ({cfg.screen_candidates}) must be a positive "
-            f"multiple of pop_size ({cfg.pop_size})"
-        )
-    if cfg.shadow_interval < 1:
-        raise ValueError(
-            f"shadow_interval ({cfg.shadow_interval}) must be >= 1"
-        )
+def _resolve_eval_mode(cfg: ERLConfig) -> str:
+    # Backward compatibility: if prefix_steps is set, infer prefix mode
+    if cfg.eval_mode == "full" and cfg.prefix_steps is not None:
+        return "prefix"
+    return cfg.eval_mode
 
 
 def train(
@@ -902,68 +541,34 @@ def train(
     *,
     on_generation: Callable[[Metrics], None] | None = None,
 ) -> TD3State:
+    mode = _resolve_eval_mode(cfg)
+    head_mode = "ensemble" if mode == "ensemble" else "random"
     run = build_run(
         cfg,
         lambda obs_dim, action_dim: make_head(
-            "random", obs_dim, action_dim, cfg.critic_hidden_dims
+            head_mode,
+            obs_dim,
+            action_dim,
+            cfg.critic_hidden_dims,
+            k_ensembles=cfg.k_ensembles,
         ),
     )
-    try:
-        _validate_config(cfg, run.horizon)
-    except ValueError:
-        run.close()
-        raise
 
     shadow_key = jax.random.key(cfg.seed + _SHADOW_KEY_OFFSET)
-    if cfg.prefix_steps is not None or cfg.prefix_adapt:
-        rl_env = environments.make_vec_env(
-            cfg.env_name, 1, async_=cfg.async_env, to_jax=True
-        )
-        pop_env = environments.make_vec_env(
-            cfg.env_name, cfg.pop_size, async_=cfg.async_env, to_jax=True
-        )
-        run.closers += [rl_env.close, pop_env.close]
+    # Split vec_envs: 1 env for RL actor exploration, pop_size envs for ES population
+    rl_env = environments.make_vec_env(
+        cfg.env_name, 1, async_=cfg.async_env, to_jax=True
+    )
+    pop_env = environments.make_vec_env(
+        cfg.env_name, cfg.pop_size, async_=cfg.async_env, to_jax=True
+    )
+    run.closers += [rl_env.close, pop_env.close]
 
-        if cfg.prefix_adapt:
-            tag = "prefix-adapt"
-            grid = tuple(h for h in ADAPT_H_GRID if h < run.horizon) + (
-                run.horizon,
-            )
-            adapt_state = AdaptState(
-                grid=grid,
-                current_h=run.horizon,
-                last_r_vec=np.ones(len(grid), dtype=np.float32),
-            )
-
-            def step_gen() -> Metrics:
-                return _adapt_prefix_generation(
-                    run, rl_env, pop_env, adapt_state, shadow_key
-                )
-        else:
-            tag = f"prefix-h{cfg.prefix_steps}"
-
-            def step_gen() -> Metrics:
-                assert cfg.prefix_steps is not None
-                return _prefix_generation(
-                    run, rl_env, pop_env, cfg.prefix_steps, shadow_key
-                )
-    else:
-        tag = (
-            f"erl-screen{cfg.screen_candidates}"
-            if cfg.screen_candidates is not None
-            else ("erl-log" if cfg.log_prefixes else "erl")
-        )
-        vec_env = environments.make_vec_env(
-            cfg.env_name, cfg.pop_size + 1, async_=cfg.async_env, to_jax=True
-        )
-        run.closers.append(vec_env.close)
-
-        def step_gen() -> Metrics:
-            return _generation(run, vec_env, shadow_key)
+    tag = f"{mode}" if cfg.prefix_steps is None else f"{mode}-h{cfg.prefix_steps}"
 
     try:
         while run.env_steps < cfg.step_budget:
-            metrics = step_gen()
+            metrics = _step_generation(run, rl_env, pop_env, shadow_key)
             metrics |= maybe_evaluate(run)
             metrics |= {
                 "generation": float(run.generation),
@@ -975,6 +580,7 @@ def train(
             run.generation += 1
     finally:
         run.close()
+
     return run.td3_state
 
 

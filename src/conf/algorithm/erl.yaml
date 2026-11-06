@@ -1,22 +1,12 @@
 # @package algorithm
-# gamma/tau/batch_size/buffer_capacity/warmup_steps match sac/td3/crossq
-# for a controlled comparison; actor_lr/critic_lr/policy_noise/noise_clip/
-# policy_freq/exploration_noise mirror td3.yaml since the gradient half of
-# ERL is plain TD3 (see common/td3.py).
+# Unified ERL Configuration: supports full ERL, prefix h, h-bootstrap,
+# Q-critic surrogate (random / always), ensemble critic, and SEMARL TD-error gate.
 name: erl
 
-# episode length for CEM population fitness + the RL rollout. Measured
-# against the whole registered env suite: exact for MuJoCo (max_episode_
-# steps=1000) and dm_control's default 10s episode (its shimmy wrapper
-# doesn't expose max_episode_steps, so this can't be auto-detected there
-# either way); MyoSuite tasks are shorter (50-1000) so a few generations
-# there run past one episode - wastes some compute, doesn't break anything
-# (collect_parallel_episode's alive-mask still scores only the first
-# episode). Override per-env with horizon=... if that waste matters.
 horizon: 1000
 async_env: true
 
-# population: CEM over ActorHead's flat params, evaluated on Z(s)
+# Population (CEM over ActorHead's flat params, evaluated on Z(s))
 pop_size: 10
 embedding_dim: 256
 sigma_init: 1e-3
@@ -39,30 +29,29 @@ buffer_capacity: 1_000_000
 warmup_steps: 10_000
 train_ratio: 1.0
 
-# EA <-> RL gene flow (gated until the buffer is past warmup_steps).
-# ea_tau matches the Polyak-averaging scale used for target networks
-# (tau above) rather than a 50% blend every sync; rl_to_ea_sync_period
-# follows the ERL/CERL literature's 3-5 generation range.
+# EA <-> RL gene flow
 rl_to_ea_sync_period: 5
 ea_tau: 0.005
 
-# population fitness: coin flip per generation (real full-episode return
-# with probability theta, else a critic-bootstrap estimate). 1.0 = pure real
-# evaluation (0.6 was EvoRainbow's h-step coin flip, which §3.4 showed rolls
-# out the full horizon anyway and only degrades selection).
-theta: 1.0
-h_steps: 250
-
-# short-prefix population evaluation (null = full horizon)
+# Evaluation Mode: full | prefix | prefix_random | hboot | sc_erl_random | sc_erl_always | ensemble | semarl_td
+eval_mode: full
 prefix_steps: null
-prefix_adapt: false
-adapt_interval: 20
-adapt_ceiling_every: 5
-adapt_window: 3
-adapt_r_threshold: 0.9
-adapt_min_ceiling: 0.3
-# critic-mu pre-screening: ask screen_candidates from CEM, roll out top pop_size
-screen_candidates: null
+prefix_grid: [100, 200, 400, 600, 800]
+
+# Gated Surrogate Parameters
+omega: 0.79
+k_ensembles: 5
 surrogate_batch: 1024
+epsilon: 0.142
+mad_k: 2.483
+beta: 0.432
+beta_lr: 1e-3
+
+# SEMARL Adaptive TD-error Gate: p_surr(delta) = clip(alpha * exp(-beta * delta_ema), p_min, p_max)
+semarl_alpha: 1.0
+semarl_beta: 1.0
+semarl_p_min: 0.0
+semarl_p_max: 0.9
+semarl_ema_decay: 0.1
+
 shadow_interval: 10
-log_prefixes: false

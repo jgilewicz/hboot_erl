@@ -1,31 +1,23 @@
 #!/bin/bash -l
-# One (condition, seed) pair per array task, for a single TARGET_ENV.
-# 15 conditions x 5 seeds = 75 tasks: SBX baselines, ERL, SC-ERL x 4 modes,
-# the 3 uncertainty critics under a random gate (critic-vs-gate ablation),
-# short-prefix ERL (h=200, h=100) and critic-mu pre-screened ERL (40->10).
+# Benchmark Suite: Evaluates Fitness Estimation Strategies in Step-Budgeted ERL.
+# Supports 15 continuous control environments across 3 suites:
+#   - MuJoCo v5 (5 envs): HalfCheetah-v5, Hopper-v5, Walker2d-v5, Ant-v5, Swimmer-v5
+#   - DMC Dog (5 envs): dm_control/dog-stand-v0, dog-walk-v0, dog-trot-v0, dog-run-v0, dog-fetch-v0
+#   - MyoSuite (5 envs): myoElbowPose1D6MRandom-v0, myoHandReachRandom-v0, myoHandPenTwirlRandom-v0, myoHandObjHoldRandom-v0, myoLegWalk-v0
 #
-#   cd /path/to/usc_erl_jax && TARGET_ENV=HalfCheetah-v5 \
-#     sbatch --array=0-59 slurm_run_array.sh
+# 12 Conditions x 10 Seeds (0-9) = 120 tasks per TARGET_ENV.
+# Task ID = condition_index * 10 + seed
 #
-# Task id = condition_index * 5 + seed, e.g. only SC-ERL ensemble
-# (condition 7): sbatch --array=35-39 slurm_run_array.sh
-#
-# Optional: TOTAL_STEPS (default 1_000_000), TAG (extra wandb tag),
-# WANDB_MODE (default online; offline syncs after the run ends),
-# EXTRA (space-separated Hydra overrides appended to every task, e.g.
-# EXTRA="algorithm.pop_size=20" - only valid for conditions whose config
-# has those keys).
-#
-# n_envs (SBX baselines' vec-env count) follows SLURM_CPUS_PER_TASK. ERL
-# runs pop_size+1 env workers, SC-ERL pop_size+1 plus 2*eval.episodes for
-# evaluation, regardless of -c. Raise -c if a run is CPU-bound, e.g.
-#   sbatch --array=0-59 --cpus-per-task=16 slurm_run_array.sh
+# Example usage:
+#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-9 slurm_run_array.sh           # ERL baseline, all 10 seeds
+#   TARGET_ENV=HalfCheetah-v5 sbatch --array=20-29 slurm_run_array.sh         # prefix-h200, all 10 seeds
+#   TARGET_ENV=HalfCheetah-v5 sbatch --array=0-119 slurm_run_array.sh        # full matrix on one env
 
 #SBATCH -N 1
 #SBATCH -c 8
 #SBATCH --mem=16gb
 #SBATCH --time=0-12:00:00
-#SBATCH --job-name=erl
+#SBATCH --job-name=erl-bench
 #SBATCH -p lem-gpu
 #SBATCH --gres=gpu:hopper:1
 #SBATCH --output=logs/slurm-%A_%a.out
@@ -34,33 +26,27 @@
 set -euo pipefail
 
 ENV="${TARGET_ENV:?set TARGET_ENV, e.g. TARGET_ENV=HalfCheetah-v5}"
-# default: the directory sbatch was run from (the checkout)
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:?run sbatch from the checkout or set PROJECT_DIR}}"
 TOTAL_STEPS="${TOTAL_STEPS:-1_000_000}"
-TAG="${TAG:-sc-erl-v1}"
+TAG="${TAG:-paper-benchmark-v1}"
 
-# name|overrides
+# Unified conditions: name|overrides
 CONDITIONS=(
-  "sac|algorithm=sac"
-  "ppo|algorithm=ppo"
-  "td3|algorithm=td3"
-  "crossq|algorithm=crossq"
-  "erl|algorithm=erl"
-  "sc_erl-random|algorithm=sc_erl algorithm.mode=random"
-  "sc_erl-dropout|algorithm=sc_erl algorithm.mode=dropout"
-  "sc_erl-ensemble|algorithm=sc_erl algorithm.mode=ensemble"
-  "sc_erl-evidential|algorithm=sc_erl algorithm.mode=evidential"
-  "sc_erl-dropout-rgate|algorithm=sc_erl algorithm.mode=dropout algorithm.random_gate=true"
-  "sc_erl-ensemble-rgate|algorithm=sc_erl algorithm.mode=ensemble algorithm.random_gate=true"
-  "sc_erl-evidential-rgate|algorithm=sc_erl algorithm.mode=evidential algorithm.random_gate=true"
-  "prefix-h200|algorithm=erl algorithm.prefix_steps=200"
-  "prefix-h100|algorithm=erl algorithm.prefix_steps=100"
-  "erl-screen|algorithm=erl algorithm.screen_candidates=40"
-  "prefix-adapt|algorithm=erl algorithm.prefix_adapt=true"
-  "prefix-h400|algorithm=erl algorithm.prefix_steps=400"
-  "erl-log|algorithm=erl algorithm.log_prefixes=true"
+  "erl|algorithm=erl algorithm.eval_mode=full"
+  "prefix-h100|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=100"
+  "prefix-h200|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=200"
+  "prefix-h400|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=400"
+  "prefix-h600|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=600"
+  "prefix-h800|algorithm=erl algorithm.eval_mode=prefix algorithm.prefix_steps=800"
+  "prefix-random|algorithm=erl algorithm.eval_mode=prefix_random"
+  "hboot-h200|algorithm=erl algorithm.eval_mode=hboot algorithm.prefix_steps=200"
+  "sc_erl-random|algorithm=erl algorithm.eval_mode=sc_erl_random algorithm.omega=0.79"
+  "sc_erl-always|algorithm=erl algorithm.eval_mode=sc_erl_always"
+  "ensemble|algorithm=erl algorithm.eval_mode=ensemble algorithm.k_ensembles=5"
+  "semarl-td|algorithm=erl algorithm.eval_mode=semarl_td algorithm.semarl_alpha=1.0 algorithm.semarl_beta=1.0"
 )
-SEEDS=(0 1 2 3 4)
+
+SEEDS=(0 1 2 3 4 5 6 7 8 9)
 N_SEEDS=${#SEEDS[@]}
 
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
@@ -74,19 +60,24 @@ RUN_NAME="${NAME}_${ENV_SLUG}_s${SEED}"
 echo "Task ${TASK_ID} | ${NAME} | ${ENV} | seed ${SEED}"
 
 cd "${PROJECT_DIR}"
-# no `module load`: the venv carries Python, jax[cuda12] wheels bundle CUDA.
-# venv binaries, not uv's runner: parallel array tasks race on the shared uv cache
-VENV="${PROJECT_DIR}/.venv/bin"
-[[ -x "${VENV}/python" ]] || {
-  echo "no venv at ${VENV} - run 'uv sync' in ${PROJECT_DIR} on the login node before submitting" >&2
-  exit 1
-}
+
+# Select environment venv (MyoSuite requires dedicated python stack)
+if [[ "${ENV}" == myo* ]]; then
+  VENV="${PROJECT_DIR}/.venv-myosuite/bin"
+  [[ -x "${VENV}/python" ]] || {
+    echo "no myosuite venv at ${VENV} - ensure .venv-myosuite is installed" >&2
+    exit 1
+  }
+else
+  VENV="${PROJECT_DIR}/.venv/bin"
+  [[ -x "${VENV}/python" ]] || {
+    echo "no venv at ${VENV} - run 'uv sync' in ${PROJECT_DIR} on the login node" >&2
+    exit 1
+  }
+fi
 
 : "${WANDB_API_KEY:?export WANDB_API_KEY before submitting}"
-# online: runs are supervised live from wandb (compute nodes have internet)
 export WANDB_MODE="${WANDB_MODE:-online}"
-# per-run dir: a shared one makes every task re-sync every other task's run;
-# prefer PD storage when available so $HOME (50 GB cap) does not fill up
 PD_ROOT="/lustre/pd03/${SLURM_JOB_ACCOUNT:-hpc-jakgil6519-1780267238}"
 if [[ -d "${PD_ROOT}" && -w "${PD_ROOT}" ]]; then
   export WANDB_DIR="${PD_ROOT}/wandb_logs/${RUN_NAME}"
