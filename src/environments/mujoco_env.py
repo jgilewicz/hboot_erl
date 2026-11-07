@@ -12,6 +12,7 @@ _TASKS = (
     "Walker2d-v5",
     "Ant-v5",
     "Swimmer-v5",
+    "Humanoid-v5",
 )
 
 

@@ -40,6 +40,7 @@ EvalMode = Literal[
     "sc_erl_always",
     "ensemble",
     "semarl_td",
+    "rl_only",
 ]
 EVAL_MODES: tuple[str, ...] = get_args(EvalMode)
 PREFIX_GRID: tuple[int, ...] = (100, 200, 400, 600, 800)
@@ -263,23 +264,15 @@ def ask_population(run: Run) -> tuple[jax.Array, ActorHead]:
     return flat_pop, jax.vmap(run.unravel_head)(flat_pop)
 
 
-def train_and_merge(run: Run, gen_env_steps: int) -> Metrics:
+def train_td3(run: Run, gen_env_steps: int) -> Metrics:
     num_updates = int(run.cfg.train_ratio * gen_env_steps)
-    td3_state, critic_loss, td_err = run.train_td3(
+    run.td3_state, critic_loss, td_err = run.train_td3(
         run.td3_state,
         run.buffer.data,
         jnp.asarray(len(run.buffer)),
         jnp.asarray(num_updates),
         next_key(run),
     )
-    champion = run.unravel_head(run.cem.elite)
-    actor = genetic_soft_update(
-        td3_state.online.actor, champion, run.cfg.ea_tau
-    )
-    run.td3_state = td3_state._replace(
-        online=td3_state.online._replace(actor=actor)
-    )
-    # Update running EMA of absolute TD-error
     decay = run.cfg.semarl_ema_decay
     run.td_error_ema = (1.0 - decay) * run.td_error_ema + decay * float(td_err)
     return {
@@ -289,11 +282,24 @@ def train_and_merge(run: Run, gen_env_steps: int) -> Metrics:
     }
 
 
+def train_and_merge(run: Run, gen_env_steps: int) -> Metrics:
+    metrics = train_td3(run, gen_env_steps)
+    champion = run.unravel_head(run.cem.elite)
+    actor = genetic_soft_update(
+        run.td3_state.online.actor, champion, run.cfg.ea_tau
+    )
+    run.td3_state = run.td3_state._replace(
+        online=run.td3_state.online._replace(actor=actor)
+    )
+    return metrics
+
+
 def maybe_evaluate(run: Run) -> Metrics:
     eval_env_name = run.cfg.eval_env_name or run.cfg.env_name
-    prev = run.env_steps - (
-        run.horizon + run.cfg.pop_size * (run.cfg.prefix_steps or run.horizon)
-    )
+    pop_steps = run.cfg.pop_size * (run.cfg.prefix_steps or run.horizon)
+    if run.cfg.eval_mode == "rl_only":
+        pop_steps = 0
+    prev = run.env_steps - (run.horizon + pop_steps)
     if prev // run.cfg.eval_interval == run.env_steps // run.cfg.eval_interval:
         return {}
     r = evaluate_actor(
@@ -370,6 +376,37 @@ def _surrogate_fitness(
 # --- Unified Generation Step ---
 
 
+def _collect_rl_episode(
+    run: Run, rl_env: gym.vector.VectorEnv, warmup: bool
+) -> None:
+    online = run.td3_state.online
+
+    def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
+        return rl_policy_step(
+            online.embedding,
+            online.actor,
+            states,
+            act_key,
+            run.action_limit,
+            run.cfg.exploration_noise,
+            warmup,
+        )
+
+    collect_parallel_episode(
+        rl_env, next_key(run), rl_policy, run.buffer, run.horizon
+    )
+
+
+def _step_rl_only(run: Run, rl_env: gym.vector.VectorEnv) -> Metrics:
+    # control condition: same TD3 and budget, no population or gene flow
+    warmup = len(run.buffer) < run.cfg.warmup_steps
+    _collect_rl_episode(run, rl_env, warmup)
+    run.env_steps += run.horizon
+    if warmup:
+        return {"cost/real_frac": 0.0}
+    return {"cost/real_frac": 0.0} | train_td3(run, run.horizon)
+
+
 def _step_generation(
     run: Run,
     rl_env: gym.vector.VectorEnv,
@@ -382,24 +419,11 @@ def _step_generation(
     flat_pop, pop_heads = ask_population(run)
     online = run.td3_state.online
 
-    def rl_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
-        return rl_policy_step(
-            online.embedding,
-            online.actor,
-            states,
-            act_key,
-            run.action_limit,
-            cfg.exploration_noise,
-            warmup,
-        )
-
     def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
         return heads_policy(online.embedding, pop_heads, states)
 
     # 1. RL actor always runs a full horizon rollout into the replay buffer
-    collect_parallel_episode(
-        rl_env, next_key(run), rl_policy, run.buffer, run.horizon
-    )
+    _collect_rl_episode(run, rl_env, warmup)
 
     metrics: Metrics = {}
 
@@ -623,10 +647,13 @@ def train(
     rl_env = environments.make_vec_env(
         cfg.env_name, 1, async_=cfg.async_env, to_jax=True
     )
-    pop_env = environments.make_vec_env(
-        cfg.env_name, cfg.pop_size, async_=cfg.async_env, to_jax=True
-    )
-    run.closers += [rl_env.close, pop_env.close]
+    run.closers.append(rl_env.close)
+    pop_env = None
+    if mode != "rl_only":
+        pop_env = environments.make_vec_env(
+            cfg.env_name, cfg.pop_size, async_=cfg.async_env, to_jax=True
+        )
+        run.closers.append(pop_env.close)
 
     tag = (
         f"{mode}" if cfg.prefix_steps is None else f"{mode}-h{cfg.prefix_steps}"
@@ -634,7 +661,10 @@ def train(
 
     try:
         while run.env_steps < cfg.step_budget:
-            metrics = _step_generation(run, rl_env, pop_env, shadow_key)
+            if pop_env is None:
+                metrics = _step_rl_only(run, rl_env)
+            else:
+                metrics = _step_generation(run, rl_env, pop_env, shadow_key)
             metrics |= maybe_evaluate(run)
             metrics |= {
                 "generation": float(run.generation),
