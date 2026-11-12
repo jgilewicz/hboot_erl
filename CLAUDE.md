@@ -39,7 +39,7 @@ src/
 ## Slurm (WCSS Lem)
 
 - Single benchmark runner: [`slurm_run_array.sh`](file:///Users/kuba/Home/research/usc_erl_jax/slurm_run_array.sh).
-- Suites (`SUITE`, task = cond×10+seed): `core` (5 conds, 0-49), `controls` (rl-only, sc_erl-always; 0-19), `ablation-horizon` (h100/400/800; 0-29), `all` (0-99). Submit with `scripts/submit_suite.sh <suite> <env>...`.
+- Suites (`SUITE`, task = cond×10+seed): `core` (5 conds, 0-49), `controls` (td3 = rl_only, sc_erl-always; 0-19), `ablation-horizon` (h100/400/800; 0-29), `all` (0-99). Submit with `scripts/submit_suite.sh <suite> <env>...`.
 - Paper envs: MuJoCo v5 HalfCheetah, Hopper, Walker2d, Ant, Swimmer, Humanoid. DMC Dog and MyoSuite (`.venv-myosuite`) stay registered.
 - Run `uv sync` on the login node prior to submissions. Jobs execute `.venv/bin/python` directly on `lem-gpu` (1x NVIDIA H100, 8 CPUs, 16GB RAM).
 - Online wandb logging default; syncs to Lustre `$PD_ROOT/wandb_logs` when offline.

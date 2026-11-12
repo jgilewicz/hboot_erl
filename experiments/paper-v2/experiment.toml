@@ -1,0 +1,56 @@
+name = "paper-v2"
+question = "Does the population help over TD3 alone, and does truncated evaluation work because of how it splits the budget rather than how well it ranks?"
+
+envs = ["HalfCheetah-v5", "Hopper-v5", "Walker2d-v5", "Ant-v5", "Swimmer-v5", "Humanoid-v5"]
+conditions = ["prefix-h200", "td3", "sc_erl-always", "erl", "sc_erl-random", "prefix-td", "hboot-td"]
+seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+total_steps = 1_000_000
+
+[wandb]
+entity = "w1ndrunn3rr-wroc-aw-univeristy-of-science-and-technology"
+project = "h_boostrap_"
+tag = "paper-v2"
+# CORE on the first 4 envs is not rerun: those cells come from paper-core-v1
+join = ["paper-core-v1"]
+run_name = '^(?P<condition>.+)_(?P<env>[^_]+)_s(?P<seed>\d+)$'
+
+[metric]
+keys = ["perf/eval_rl"]
+x = ["env_steps"]
+label = "eval return"
+final_window = 0.1
+
+[reference]
+condition = "erl"
+thresholds = [0.25, 0.5, 0.75, 0.9]
+
+[[comparisons]]
+a = "prefix-h200"
+b = "td3"
+question = "H1: does the population help over TD3 alone"
+
+[[comparisons]]
+a = "prefix-h200"
+b = "sc_erl-always"
+question = "H2: prefix vs surrogate on every individual (equivalence, |dIQM| < 0.1)"
+
+[[comparisons]]
+a = "prefix-h200"
+b = "erl"
+question = "H3: prefix vs full-episode ERL"
+
+[[secondary]]
+key = "cost/real_frac"
+label = "real_frac"
+note = "share evaluated for real; lower = cheaper"
+
+[[secondary]]
+key = "prefix/h"
+label = "prefix h"
+note = "evaluation horizon actually used"
+
+[cluster]
+ssh_host = "wcss"
+
+[report]
+url = ""

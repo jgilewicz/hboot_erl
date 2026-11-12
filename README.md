@@ -155,7 +155,7 @@ uv run python -m train total_steps=3000 algorithm.horizon=100 \
 | Suite | Conditions | Array |
 |---|---|---|
 | `core` | erl, sc_erl-random, prefix-h200, prefix-td, hboot-td | 0-49 |
-| `controls` | rl-only, sc_erl-always | 0-19 |
+| `controls` | td3 (`rl_only`), sc_erl-always | 0-19 |
 | `ablation-horizon` | prefix-h100, prefix-h400, prefix-h800 | 0-29 |
 | `all` | union of the above | 0-99 |
 

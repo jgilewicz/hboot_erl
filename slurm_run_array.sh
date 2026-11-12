@@ -5,7 +5,7 @@
 #
 # Suites (SUITE env var, default core); task ID = condition_index * 10 + seed:
 #   core             erl, sc_erl-random, prefix-h200, prefix-td, hboot-td  array 0-49
-#   controls         rl-only (TD3, no population), sc_erl-always            array 0-19
+#   controls         td3 (rl_only, no population), sc_erl-always             array 0-19
 #   ablation-horizon prefix-h100, prefix-h400, prefix-h800                  array 0-29
 #   all              core + controls + ablation-horizon                     array 0-99
 #
@@ -41,7 +41,7 @@ CORE=(
   "hboot-td|algorithm=erl algorithm.eval_mode=hboot_td"
 )
 CONTROLS=(
-  "rl-only|algorithm=erl algorithm.eval_mode=rl_only"
+  "td3|algorithm=erl algorithm.eval_mode=rl_only"
   "sc_erl-always|algorithm=erl algorithm.eval_mode=sc_erl_always"
 )
 ABLATION_HORIZON=(
