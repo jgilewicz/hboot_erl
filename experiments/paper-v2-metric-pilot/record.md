@@ -1,6 +1,6 @@
 # paper-v2 pilot metryki: champion populacji vs aktor RL
 
-- **Status:** zgoda na 18 runów (2026-11-14). Dodane `pop/champion_fitness`, test zgodności PASS ponownie.
+- **Status:** 18 runów wysłane 2026-11-14 (commit `da290cd`). Dodane `pop/champion_fitness`, test zgodności PASS ponownie.
 - **Account:** `hpc-jakgil6519-1780267238`
 - **Prerejestracja:** 2026-11-14, przed pierwszym runem pilota
 - **Spec:** `experiment.toml`
@@ -30,6 +30,13 @@
 
 - Swimmer-v5, Ant-v5 × erl, prefix-h200, sc_erl-random × seedy 0-2 = 18 runów. Tag `paper-v2-metric`.
 - `SUITE=core`, `--array=0-2,10-12,20-22` per env.
+
+| Job ID | Data | Env | Array | Commit |
+|---|---|---|---|---|
+| 6320819 | 2026-11-14 | Swimmer-v5 | core 0-2,10-12,20-22, --time=12h | da290cd |
+| 6320820 | 2026-11-14 | Ant-v5 | core 0-2,10-12,20-22, --time=12h | da290cd |
+
+- Saldo przed submitem (`preflight.sh`): 4484.9 CPU-h, 1340.8 GPU-h. Logi SLURM na PD.
 - Koszt z czasów etapu 2 / `paper-core-v1` (bez narzutu championa): Swimmer 3.3 h, Ant 3.8 h na seed, razem ~21.5 GPU-h, ~86 CPU-h.
 
 ## Rozstrzygnięcie (ustalone przed runami)

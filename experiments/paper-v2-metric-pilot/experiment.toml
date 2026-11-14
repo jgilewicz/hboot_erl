@@ -30,3 +30,15 @@ min_wins = 3
 
 [cluster]
 ssh_host = "wcss"
+
+[[cluster.jobs]]
+id = "6320819"
+env = "Swimmer-v5"
+array = "0-2,10-12,20-22"
+note = "SUITE=core, TAG=paper-v2-metric, commit da290cd"
+
+[[cluster.jobs]]
+id = "6320820"
+env = "Ant-v5"
+array = "0-2,10-12,20-22"
+note = "SUITE=core, TAG=paper-v2-metric, commit da290cd"
