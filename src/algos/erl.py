@@ -28,6 +28,8 @@ from modules.evo_module import CEM
 
 Metrics = dict[str, float]
 _SHADOW_KEY_OFFSET = 40_000
+_EVAL_SEED_OFFSET = 10_000
+CHAMPION_EVAL_EPISODES = 10
 
 EvalMode = Literal[
     "full",
@@ -140,6 +142,8 @@ class Run:
     generation: int = 0
     env_steps: int = 0
     pending_injection: int | None = None
+    # embedding the population was scored with in the current generation
+    elite_embedding: SharedStateEmbedding | None = None
     # Running EMA of absolute TD-error (for semarl_td mode)
     td_error_ema: float = 0.0
     # Surrogate calibration state (for gated modes)
@@ -302,13 +306,27 @@ def maybe_evaluate(run: Run) -> Metrics:
     prev = run.env_steps - (run.horizon + pop_steps)
     if prev // run.cfg.eval_interval == run.env_steps // run.cfg.eval_interval:
         return {}
+    seed = run.cfg.seed + _EVAL_SEED_OFFSET
     r = evaluate_actor(
         eval_env_name,
         run.td3_state,
         episodes=run.cfg.eval_episodes,
-        seed=run.cfg.seed + 10_000,
+        seed=seed,
     )
-    return {"perf/eval_rl": r}
+    if run.elite_embedding is None:
+        return {"perf/eval_rl": r}
+    champion = evaluate_policy(
+        eval_env_name,
+        run.elite_embedding,
+        run.unravel_head(run.cem.elite),
+        episodes=CHAMPION_EVAL_EPISODES,
+        seed=seed,
+    )
+    return {
+        "perf/eval_rl": r,
+        "perf/eval_champion": champion,
+        "perf/eval_best": max(r, champion),
+    }
 
 
 def print_generation(run: Run, metrics: Metrics, tag: str) -> None:
@@ -318,6 +336,7 @@ def print_generation(run: Run, metrics: Metrics, tag: str) -> None:
     print(
         f"gen {run.generation:4d} | steps {run.env_steps:7d} | "
         f"eval={show('perf/eval_rl')} | "
+        f"champion={show('perf/eval_champion')} | "
         f"real_frac={show('cost/real_frac', '.2f')} | "
         f"critic_loss={show('train/critic_loss', '.4f')} | "
         f"td_err={show('train/td_error', '.3f')} (ema={show('train/td_error_ema', '.3f')}) | "
@@ -418,6 +437,7 @@ def _step_generation(
     warmup = len(run.buffer) < cfg.warmup_steps
     flat_pop, pop_heads = ask_population(run)
     online = run.td3_state.online
+    run.elite_embedding = online.embedding
 
     def pop_policy(act_key: jax.Array, states: jnp.ndarray) -> jnp.ndarray:
         return heads_policy(online.embedding, pop_heads, states)
@@ -438,6 +458,7 @@ def _step_generation(
         return {
             "cost/real_frac": 1.0,
             "screen/cem_std": float(jnp.sqrt(run.cem.cov).mean()),
+            "pop/champion_fitness": float(jnp.max(fitness)),
         }
 
     # 3. Dispatched Population Evaluation based on mode
@@ -609,6 +630,8 @@ def _step_generation(
     run.cem.tell(fitness, flat_pop)
 
     metrics["screen/cem_std"] = float(jnp.sqrt(run.cem.cov).mean())
+    # cem.elite is the argmax of this fitness, on this condition's own scale
+    metrics["pop/champion_fitness"] = float(jnp.max(fitness))
     metrics |= train_and_merge(run, gen_env_steps)
 
     if run.generation % cfg.rl_to_ea_sync_period == 0:
@@ -687,6 +710,23 @@ def evaluate_actor(
     episodes: int = 5,
     seed: int | None = None,
 ) -> float:
+    return evaluate_policy(
+        env_name,
+        td3_state.online.embedding,
+        td3_state.online.actor,
+        episodes=episodes,
+        seed=seed,
+    )
+
+
+def evaluate_policy(
+    env_name: str,
+    embedding: SharedStateEmbedding,
+    actor: ActorHead,
+    *,
+    episodes: int,
+    seed: int | None,
+) -> float:
     env = environments.make_env(env_name)
     try:
         total_reward = 0.0
@@ -695,11 +735,7 @@ def evaluate_actor(
             done = False
             while not done:
                 action = np.asarray(
-                    _deterministic_action(
-                        td3_state.online.embedding,
-                        td3_state.online.actor,
-                        jnp.asarray(state),
-                    )
+                    _deterministic_action(embedding, actor, jnp.asarray(state))
                 )
                 state, reward, terminated, truncated, _ = env.step(action)
                 total_reward += float(reward)

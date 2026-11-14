@@ -1,0 +1,32 @@
+name = "paper-v2-metric-pilot"
+question = "Does the population champion score higher than the TD3 actor, i.e. does perf/eval_rl understate ERL (Swimmer) or leave the easy-group results intact (Ant)?"
+
+# closed list, fixed before any pilot run
+envs = ["Swimmer-v5", "Ant-v5"]
+conditions = ["erl", "prefix-h200", "sc_erl-random"]
+seeds = [0, 1, 2]
+total_steps = 1_000_000
+# td3 has no population: compared from existing runs (tag paper-v2 / paper-core-v1)
+controls = ["td3"]
+
+[wandb]
+entity = "w1ndrunn3rr-wroc-aw-univeristy-of-science-and-technology"
+project = "h_boostrap_"
+tag = "paper-v2-metric"
+run_name = '^(?P<condition>.+)_(?P<env>[^_]+)_s(?P<seed>\d+)$'
+
+[metric]
+keys = ["perf/eval_rl", "perf/eval_champion", "perf/eval_best", "pop/champion_fitness"]
+x = ["env_steps"]
+label = "eval return"
+final_window = 0.1
+
+[decision]
+# per (env, condition), final-window means of the same run, seeds 0-2:
+# "champion clearly > RL" = mean(champion - rl) >= 10% of |mean(rl)|
+# and champion > rl on 3/3 seeds; "champion ~ RL" = |mean diff| < 10%
+min_rel_gain = 0.10
+min_wins = 3
+
+[cluster]
+ssh_host = "wcss"
